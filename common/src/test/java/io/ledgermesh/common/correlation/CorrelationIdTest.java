@@ -23,7 +23,8 @@ class CorrelationIdTest {
 
   @Test
   void fallsBackToPayloadValueOrMintsOne() {
-    assertThat(CorrelationId.fromHeaders(new RecordHeaders(), "from-payload")).isEqualTo("from-payload");
+    assertThat(CorrelationId.fromHeaders(new RecordHeaders(), "from-payload"))
+        .isEqualTo("from-payload");
     assertThat(CorrelationId.fromHeaders(new RecordHeaders(), null)).hasSize(36);
   }
 

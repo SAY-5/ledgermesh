@@ -11,8 +11,7 @@ import org.springframework.transaction.annotation.Transactional;
 /**
  * Runs a unit of work exactly once per event id. The processed marker is written in the same
  * transaction as the work, so a crash after commit makes the redelivery a no-op and a crash before
- * commit leaves nothing behind. A primary key violation on the marker is treated as "already
- * done".
+ * commit leaves nothing behind. A primary key violation on the marker is treated as "already done".
  */
 @Component
 public class IdempotentConsumer {

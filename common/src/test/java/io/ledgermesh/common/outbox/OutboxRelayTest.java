@@ -25,7 +25,8 @@ import org.springframework.kafka.support.SendResult;
 @DataJpaTest
 class OutboxRelayTest {
 
-  private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC);
+  private static final Clock CLOCK =
+      Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC);
 
   @Autowired private OutboxEventRepository repository;
 
@@ -48,12 +49,15 @@ class OutboxRelayTest {
 
     assertThat(relay.relayPending()).isEqualTo(3);
 
-    ArgumentCaptor<ProducerRecord<String, String>> captor = ArgumentCaptor.forClass(ProducerRecord.class);
+    ArgumentCaptor<ProducerRecord<String, String>> captor =
+        ArgumentCaptor.forClass(ProducerRecord.class);
     verify(kafka, times(3)).send(captor.capture());
-    assertThat(captor.getAllValues()).extracting(ProducerRecord::key)
+    assertThat(captor.getAllValues())
+        .extracting(ProducerRecord::key)
         .containsExactly("order-1", "order-1", "order-2");
     assertThat(repository.countByPublishedAtIsNull()).isZero();
-    assertThat(repository.findAll()).allSatisfy(r -> assertThat(r.getPublishedAt()).isEqualTo(CLOCK.instant()));
+    assertThat(repository.findAll())
+        .allSatisfy(r -> assertThat(r.getPublishedAt()).isEqualTo(CLOCK.instant()));
   }
 
   @Test
@@ -84,16 +88,19 @@ class OutboxRelayTest {
     when(kafka.send(any(ProducerRecord.class))).thenReturn(acked());
     relay.relayPending();
 
-    ArgumentCaptor<ProducerRecord<String, String>> captor = ArgumentCaptor.forClass(ProducerRecord.class);
+    ArgumentCaptor<ProducerRecord<String, String>> captor =
+        ArgumentCaptor.forClass(ProducerRecord.class);
     verify(kafka, times(3)).send(captor.capture());
     ProducerRecord<String, String> first = captor.getAllValues().get(0);
-    assertThat(new String(first.headers().lastHeader("x-correlation-id").value())).isEqualTo("corr");
+    assertThat(new String(first.headers().lastHeader("x-correlation-id").value()))
+        .isEqualTo("corr");
     assertThat(new String(first.headers().lastHeader("event-id").value())).isEqualTo("e1");
     assertThat(List.of(first.topic())).containsExactly("order.created");
   }
 
   private static OutboxEvent row(String eventId, String orderId) {
-    return new OutboxEvent(eventId, "order.created", orderId, "OrderCreated", "corr", "{}", CLOCK.instant());
+    return new OutboxEvent(
+        eventId, "order.created", orderId, "OrderCreated", "corr", "{}", CLOCK.instant());
   }
 
   private static CompletableFuture<SendResult<String, String>> acked() {

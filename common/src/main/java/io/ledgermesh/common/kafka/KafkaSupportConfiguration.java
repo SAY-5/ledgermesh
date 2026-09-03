@@ -33,7 +33,8 @@ public class KafkaSupportConfiguration {
   public CommonErrorHandler kafkaErrorHandler() {
     DefaultErrorHandler handler =
         new DefaultErrorHandler(new FixedBackOff(500L, FixedBackOff.UNLIMITED_ATTEMPTS));
-    handler.addNotRetryableExceptions(DeserializationException.class, IllegalArgumentException.class);
+    handler.addNotRetryableExceptions(
+        DeserializationException.class, IllegalArgumentException.class);
     return handler;
   }
 }
