@@ -1,0 +1,34 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:orders;DB_CLOSE_DELAY=-1
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+  kafka:
+    bootstrap-servers: localhost:1
+    admin:
+      auto-create: false
+    listener:
+      auto-startup: false
+
+ledgermesh:
+  outbox:
+    enabled: false
+  inventory:
+    url: http://localhost:1
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      inventory:
+        sliding-window-size: 10
+        minimum-number-of-calls: 4
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 60s
+        automatic-transition-from-open-to-half-open-enabled: false
+  timelimiter:
+    instances:
+      inventory:
+        timeout-duration: 300ms
