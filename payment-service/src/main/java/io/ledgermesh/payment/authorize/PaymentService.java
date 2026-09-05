@@ -18,6 +18,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * Two step flow. {@link #record} durably stores the payment inside the consumer's idempotent
@@ -33,6 +34,7 @@ public class PaymentService {
   private final PaymentRepository payments;
   private final PaymentAuthorizer authorizer;
   private final OutboxWriter outbox;
+  private final TransactionTemplate tx;
   private final Clock clock;
   private final MeterRegistry meters;
   private final Duration graceBeforeSweep;
@@ -42,6 +44,7 @@ public class PaymentService {
       PaymentRepository payments,
       PaymentAuthorizer authorizer,
       OutboxWriter outbox,
+      TransactionTemplate tx,
       Clock clock,
       MeterRegistry meters,
       @Value("${ledgermesh.payment.sweep-grace:3s}") Duration graceBeforeSweep,
@@ -49,6 +52,7 @@ public class PaymentService {
     this.payments = payments;
     this.authorizer = authorizer;
     this.outbox = outbox;
+    this.tx = tx;
     this.clock = clock;
     this.meters = meters;
     this.graceBeforeSweep = graceBeforeSweep;
@@ -89,8 +93,12 @@ public class PaymentService {
     return Optional.of(commit(orderId, outcome));
   }
 
-  @Transactional
+  /** Persists the outcome and its event in one transaction. Safe to call from any thread. */
   public PaymentStatus commit(String orderId, AuthorizationOutcome outcome) {
+    return tx.execute(status -> applyOutcome(orderId, outcome));
+  }
+
+  private PaymentStatus applyOutcome(String orderId, AuthorizationOutcome outcome) {
     Payment payment = payments.findById(orderId).orElseThrow();
     if (!payment.getStatus().isOpen()) {
       return payment.getStatus();

@@ -19,9 +19,9 @@ import org.springframework.stereotype.Component;
 /**
  * The single decorated call to the processor. Order of decoration is
  * Retry(CircuitBreaker(TimeLimiter(call))): a hung call is cut by the time limiter, counted by the
- * breaker and retried; once the breaker is open calls fail fast; when everything is exhausted the
- * fallback defers the payment instead of failing it. Lives in its own bean so the annotations are
- * always applied through the proxy.
+ * breaker and retried; once the breaker is open calls fail fast without retrying; when retries are
+ * exhausted the fallback on the outermost decorator defers the payment instead of failing it.
+ * Lives in its own bean so the annotations are always applied through the proxy.
  */
 @Component
 public class ResilientProcessorCall {
@@ -37,8 +37,8 @@ public class ResilientProcessorCall {
     this.processor = processor;
   }
 
-  @Retry(name = RESILIENCE_NAME)
-  @CircuitBreaker(name = RESILIENCE_NAME, fallbackMethod = "defer")
+  @Retry(name = RESILIENCE_NAME, fallbackMethod = "defer")
+  @CircuitBreaker(name = RESILIENCE_NAME)
   @TimeLimiter(name = RESILIENCE_NAME)
   public CompletableFuture<AuthorizationOutcome> authorize(
       String orderId, String customerId, BigDecimal amount, AtomicInteger attempts) {
