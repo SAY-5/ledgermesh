@@ -13,7 +13,9 @@ import java.time.Instant;
 
 /** One payment per order. Open payments form the deferred retry queue. */
 @Entity
-@Table(name = "payment", indexes = @Index(name = "ix_payment_open", columnList = "status, nextAttemptAt"))
+@Table(
+    name = "payment",
+    indexes = @Index(name = "ix_payment_open", columnList = "status, nextAttemptAt"))
 public class Payment {
 
   @Id

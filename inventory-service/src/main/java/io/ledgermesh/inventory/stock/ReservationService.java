@@ -10,9 +10,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Reserves or releases stock for a whole order atomically: every line is locked, checked, and
- * only then decremented, so an order never ends up half reserved. Each change is written through
- * to the cache once the transaction commits.
+ * Reserves or releases stock for a whole order atomically: every line is locked, checked, and only
+ * then decremented, so an order never ends up half reserved. Each change is written through to the
+ * cache once the transaction commits.
  */
 @Service
 public class ReservationService {

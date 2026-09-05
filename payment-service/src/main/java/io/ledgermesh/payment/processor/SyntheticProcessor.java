@@ -61,7 +61,8 @@ public class SyntheticProcessor implements PaymentProcessor {
 
   private static String digest(String input) {
     try {
-      byte[] hash = MessageDigest.getInstance("SHA-256").digest(input.getBytes(StandardCharsets.UTF_8));
+      byte[] hash =
+          MessageDigest.getInstance("SHA-256").digest(input.getBytes(StandardCharsets.UTF_8));
       return HexFormat.of().formatHex(hash);
     } catch (NoSuchAlgorithmException e) {
       throw new IllegalStateException(e);

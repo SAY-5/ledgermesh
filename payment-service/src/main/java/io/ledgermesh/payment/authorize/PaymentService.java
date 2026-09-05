@@ -131,8 +131,14 @@ public class PaymentService {
         meters.counter("ledgermesh.payments.deferred").increment();
       }
     }
-    meters.counter("ledgermesh.payments.outcomes", "status", payment.getStatus().name()).increment();
-    log.info("payment for order {} is {} after {} attempt(s)", orderId, payment.getStatus(), payment.getAttempts());
+    meters
+        .counter("ledgermesh.payments.outcomes", "status", payment.getStatus().name())
+        .increment();
+    log.info(
+        "payment for order {} is {} after {} attempt(s)",
+        orderId,
+        payment.getStatus(),
+        payment.getAttempts());
     return payment.getStatus();
   }
 

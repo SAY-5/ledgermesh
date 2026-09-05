@@ -14,10 +14,10 @@ import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
- * Redis view of stock levels. Writes go through after the owning database transaction commits,
- * so the cache never shows a value that was rolled back; every entry carries a TTL so a missed
- * write heals itself. Reads sit behind a breaker: when Redis is unhealthy the service answers from
- * the database instead of waiting on it.
+ * Redis view of stock levels. Writes go through after the owning database transaction commits, so
+ * the cache never shows a value that was rolled back; every entry carries a TTL so a missed write
+ * heals itself. Reads sit behind a breaker: when Redis is unhealthy the service answers from the
+ * database instead of waiting on it.
  */
 @Component
 public class StockCache {

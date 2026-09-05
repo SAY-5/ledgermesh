@@ -59,13 +59,16 @@ class PaymentServiceTest {
 
   @Test
   void successfulAttemptCommitsOutcomeAndOutboxEventTogether() {
-    when(processor.authorize(anyString(), anyString(), any(), anyInt())).thenReturn(new Approved("AUTH-9"));
+    when(processor.authorize(anyString(), anyString(), any(), anyInt()))
+        .thenReturn(new Approved("AUTH-9"));
     service.record(reserved("o2"), "c");
 
     assertThat(service.attempt("o2")).contains(PaymentStatus.AUTHORIZED);
 
     assertThat(payments.findById("o2").orElseThrow().getAuthorizationCode()).isEqualTo("AUTH-9");
-    assertThat(outbox.findAll()).extracting(OutboxEvent::getTopic).containsExactly(Topics.PAYMENT_COMPLETED);
+    assertThat(outbox.findAll())
+        .extracting(OutboxEvent::getTopic)
+        .containsExactly(Topics.PAYMENT_COMPLETED);
   }
 
   @Test
@@ -79,26 +82,33 @@ class PaymentServiceTest {
     assertThat(payments.findById("o3").orElseThrow().getNextAttemptAt()).isNotNull();
 
     reset(processor);
-    when(processor.authorize(anyString(), anyString(), any(), anyInt())).thenReturn(new Approved("AUTH-3"));
+    when(processor.authorize(anyString(), anyString(), any(), anyInt()))
+        .thenReturn(new Approved("AUTH-3"));
     assertThat(service.sweep()).isEqualTo(1);
 
-    assertThat(payments.findById("o3").orElseThrow().getStatus()).isEqualTo(PaymentStatus.AUTHORIZED);
-    assertThat(outbox.findAll()).extracting(OutboxEvent::getTopic).containsExactly(Topics.PAYMENT_COMPLETED);
+    assertThat(payments.findById("o3").orElseThrow().getStatus())
+        .isEqualTo(PaymentStatus.AUTHORIZED);
+    assertThat(outbox.findAll())
+        .extracting(OutboxEvent::getTopic)
+        .containsExactly(Topics.PAYMENT_COMPLETED);
   }
 
   @Test
   void sweepPicksUpPaymentsThatWereRecordedButNeverAttempted() {
-    when(processor.authorize(anyString(), anyString(), any(), anyInt())).thenReturn(new Approved("AUTH-4"));
+    when(processor.authorize(anyString(), anyString(), any(), anyInt()))
+        .thenReturn(new Approved("AUTH-4"));
     service.record(reserved("o4"), "c");
 
     assertThat(service.sweep()).isEqualTo(1);
     assertThat(service.sweep()).isZero();
-    assertThat(payments.findById("o4").orElseThrow().getStatus()).isEqualTo(PaymentStatus.AUTHORIZED);
+    assertThat(payments.findById("o4").orElseThrow().getStatus())
+        .isEqualTo(PaymentStatus.AUTHORIZED);
   }
 
   @Test
   void settledPaymentsAreNeverAttemptedAgain() {
-    when(processor.authorize(anyString(), anyString(), any(), anyInt())).thenReturn(new Approved("AUTH-5"));
+    when(processor.authorize(anyString(), anyString(), any(), anyInt()))
+        .thenReturn(new Approved("AUTH-5"));
     service.record(reserved("o5"), "c");
     service.attempt("o5");
 

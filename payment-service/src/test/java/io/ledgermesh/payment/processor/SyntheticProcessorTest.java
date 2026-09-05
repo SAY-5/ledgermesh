@@ -11,7 +11,8 @@ import org.junit.jupiter.api.Test;
 
 class SyntheticProcessorTest {
 
-  private final SyntheticProcessor processor = new SyntheticProcessor(new BigDecimal("100"), 5, 0, 0);
+  private final SyntheticProcessor processor =
+      new SyntheticProcessor(new BigDecimal("100"), 5, 0, 0);
 
   @Test
   void declinesFlaggedCustomersAndAmountsOverTheLimit() {
@@ -68,7 +69,8 @@ class SyntheticProcessorTest {
   private String firstApproval(String orderId) {
     for (int attempt = 1; attempt < 10; attempt++) {
       try {
-        return ((Approved) processor.authorize(orderId, "cust", BigDecimal.TEN, attempt)).authorizationCode();
+        return ((Approved) processor.authorize(orderId, "cust", BigDecimal.TEN, attempt))
+            .authorizationCode();
       } catch (ProcessorUnavailableException ignored) {
         // deterministic transient fault on this attempt, try the next one
       }

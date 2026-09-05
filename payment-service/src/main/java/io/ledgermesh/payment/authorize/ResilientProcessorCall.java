@@ -20,8 +20,8 @@ import org.springframework.stereotype.Component;
  * The single decorated call to the processor. Order of decoration is
  * Retry(CircuitBreaker(TimeLimiter(call))): a hung call is cut by the time limiter, counted by the
  * breaker and retried; once the breaker is open calls fail fast without retrying; when retries are
- * exhausted the fallback on the outermost decorator defers the payment instead of failing it.
- * Lives in its own bean so the annotations are always applied through the proxy.
+ * exhausted the fallback on the outermost decorator defers the payment instead of failing it. Lives
+ * in its own bean so the annotations are always applied through the proxy.
  */
 @Component
 public class ResilientProcessorCall {
@@ -56,7 +56,11 @@ public class ResilientProcessorCall {
 
   @SuppressWarnings("unused")
   private CompletableFuture<AuthorizationOutcome> defer(
-      String orderId, String customerId, BigDecimal amount, AtomicInteger attempts, Throwable cause) {
+      String orderId,
+      String customerId,
+      BigDecimal amount,
+      AtomicInteger attempts,
+      Throwable cause) {
     log.warn(
         "payment for order {} deferred after {} attempt(s): {}",
         orderId,

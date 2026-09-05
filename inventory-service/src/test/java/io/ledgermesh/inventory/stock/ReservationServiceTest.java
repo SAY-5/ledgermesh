@@ -55,7 +55,8 @@ class ReservationServiceTest {
 
   @Test
   void unknownSkuIsRejected() {
-    assertThat(reservations.reserve(List.of(new OrderLine("ZZZ", 1)))).isEqualTo(new Rejected("UNKNOWN_SKU"));
+    assertThat(reservations.reserve(List.of(new OrderLine("ZZZ", 1))))
+        .isEqualTo(new Rejected("UNKNOWN_SKU"));
   }
 
   @Test
@@ -84,7 +85,8 @@ class ReservationServiceTest {
     try {
       List<Future<Outcome>> results =
           IntStream.range(0, 25)
-              .mapToObj(i -> pool.submit(() -> reservations.reserve(List.of(new OrderLine("A", 1)))))
+              .mapToObj(
+                  i -> pool.submit(() -> reservations.reserve(List.of(new OrderLine("A", 1)))))
               .toList();
       long reserved = 0;
       for (Future<Outcome> f : results) {

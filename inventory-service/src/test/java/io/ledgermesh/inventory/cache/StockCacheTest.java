@@ -11,7 +11,6 @@ import static org.mockito.Mockito.when;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import java.time.Duration;
-import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -50,7 +49,8 @@ class StockCacheTest {
     tx.executeWithoutResult(
         status -> {
           cache.writeThrough("A", 5);
-          verify(values, never()).set(anyString(), anyString(), org.mockito.ArgumentMatchers.any(Duration.class));
+          verify(values, never())
+              .set(anyString(), anyString(), org.mockito.ArgumentMatchers.any(Duration.class));
         });
 
     verify(values).set("stock:A", "5", Duration.ofSeconds(45));
@@ -64,7 +64,8 @@ class StockCacheTest {
           status.setRollbackOnly();
         });
 
-    verify(values, never()).set(anyString(), anyString(), org.mockito.ArgumentMatchers.any(Duration.class));
+    verify(values, never())
+        .set(anyString(), anyString(), org.mockito.ArgumentMatchers.any(Duration.class));
   }
 
   @Test
@@ -83,7 +84,8 @@ class StockCacheTest {
     for (int i = 0; i < 3; i++) {
       assertThat(cache.read("A")).isEmpty();
     }
-    assertThat(breakers.circuitBreaker(StockCache.BREAKER).getState()).isEqualTo(CircuitBreaker.State.OPEN);
+    assertThat(breakers.circuitBreaker(StockCache.BREAKER).getState())
+        .isEqualTo(CircuitBreaker.State.OPEN);
 
     assertThat(cache.read("A")).isEmpty();
     verify(values, times(3)).get(anyString());

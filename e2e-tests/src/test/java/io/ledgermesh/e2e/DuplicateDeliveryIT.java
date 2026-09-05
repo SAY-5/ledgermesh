@@ -49,21 +49,22 @@ class DuplicateDeliveryIT {
     try (KafkaProducer<String, String> producer =
         new KafkaProducer<>(
             Map.of(
-                ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, Stack.REDPANDA.getBootstrapServers(),
-                ProducerConfig.ACKS_CONFIG, "all"),
+                ProducerConfig.BOOTSTRAP_SERVERS_CONFIG,
+                Stack.REDPANDA.getBootstrapServers(),
+                ProducerConfig.ACKS_CONFIG,
+                "all"),
             new StringSerializer(),
             new StringSerializer())) {
       for (int i = 0; i < 3; i++) {
-        producer
-            .send(new ProducerRecord<>(Topics.ORDER_CREATED, event.orderId(), payload))
-            .get();
+        producer.send(new ProducerRecord<>(Topics.ORDER_CREATED, event.orderId(), payload)).get();
       }
     }
 
     await().atMost(Duration.ofSeconds(30)).until(() -> Stack.stock("E2E-DUP") == 46);
     await()
         .atMost(Duration.ofSeconds(30))
-        .until(() -> meters.counter("ledgermesh.consumer.duplicates").count() >= duplicatesBefore + 2);
+        .until(
+            () -> meters.counter("ledgermesh.consumer.duplicates").count() >= duplicatesBefore + 2);
     Thread.sleep(1500);
     assertThat(Stack.stock("E2E-DUP")).isEqualTo(46);
   }

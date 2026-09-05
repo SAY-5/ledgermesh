@@ -6,7 +6,10 @@ import org.springframework.stereotype.Component;
 
 /** Drains the deferred queue: payments the listener could not finish, or that were deferred. */
 @Component
-@ConditionalOnProperty(name = "ledgermesh.payment.sweeper", havingValue = "true", matchIfMissing = true)
+@ConditionalOnProperty(
+    name = "ledgermesh.payment.sweeper",
+    havingValue = "true",
+    matchIfMissing = true)
 public class DeferredPaymentSweeper {
 
   private final PaymentService payments;
