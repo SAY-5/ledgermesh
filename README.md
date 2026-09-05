@@ -1,0 +1,145 @@
+# LedgerMesh
+
+Fault tolerant order processing across three Spring Boot microservices on Docker: Kafka
+messaging (Redpanda), Redis caching, Resilience4j circuit breakers, time limiters and retries,
+a GitLab CI pipeline, and a chaos test that kills one service under load and proves that zero
+orders failed.
+
+`make chaos` starts the stack, submits orders at 20/s for 60 s, kills the inventory or payment
+service three times at random moments (restarting each after 5 s), waits for the saga backlog to
+drain and asserts every order reached CONFIRMED or a legitimate out of stock CANCELLED.
+
+## Architecture
+
+```
+  client --POST /orders--> order-service --order.created--> inventory-service
+                               ^   |                              |
+                               |   +--GET /stock (breaker,        | inventory.reserved / rejected
+                               |      time limiter, cache) -------+       |
+                               |                                          v
+                               +------ payment.completed / failed ---- payment-service
+                               |                                      (retry + breaker + time
+                               +------ order.cancelled --> inventory   limiter + deferred queue)
+
+  each service: Postgres database with orders/stock/payments + outbox_event + processed_event
+  inventory: Redis stock:{sku} cache (write-through after commit, TTL)
+```
+
+* **order-service** (8081): accepts orders, writes the order and an `order.created` outbox row in
+  one transaction, drives the saga `PENDING -> RESERVED -> CONFIRMED | CANCELLED` and emits
+  `order.cancelled` as compensation when a payment is declined. `GET /stock/{sku}` is a
+  read-your-writes lookup wrapped in `@CircuitBreaker` + `@TimeLimiter` with a cache fallback.
+* **inventory-service** (8082): reserves stock atomically for all lines of an order, releases it
+  on cancellation, serves stock levels from Redis with write-through and TTL.
+* **payment-service** (8083): authorizes against a deterministic synthetic processor behind
+  `Retry(CircuitBreaker(TimeLimiter(call)))`; exhaustion defers the payment to a retry queue,
+  never drops it.
+* **common**: event contracts, topic names, transactional outbox relay, idempotent consumer,
+  correlation ids, breaker transition metrics.
+
+Kill any one service at any moment and the outcome of every order is unchanged: the outbox makes
+every event durable before it is sent, idempotent consumers make every redelivery harmless, and
+the deferred queue makes a lost payment attempt resumable. [ARCHITECTURE.md](ARCHITECTURE.md)
+walks through each failure point.
+
+## Quick start
+
+```bash
+make up                 # build the three images and start Redpanda, Redis, Postgres, services
+curl -s -X POST localhost:8081/orders -H 'content-type: application/json' \
+  -d '{"customerId":"cust-1","items":[{"sku":"SKU-ALPHA","quantity":2,"unitPrice":"9.99"}]}'
+curl -s localhost:8081/orders/<id>          # PENDING -> RESERVED -> CONFIRMED
+curl -s localhost:8082/stock/SKU-ALPHA      # served from Redis
+curl -s localhost:8081/stock/SKU-ALPHA      # via order-service, "source": "live" | "cache"
+make down
+```
+
+Requirements: JDK 21, Maven 3.9, Docker with Compose, Python 3 (chaos harness).
+
+## Chaos test
+
+```bash
+make chaos    # alias: make demo
+```
+
+CHAOS_SUMMARY_PLACEHOLDER
+
+`failed / stuck` counts orders that did not reach a terminal state, orders cancelled for any
+reason other than stock, and rejected submissions. `cancelled (stock)` are orders for
+`SKU-SCARCE`, which is seeded with 40 units so the out of stock branch is exercised on every run.
+Retries, deferred payments and breaker transitions come from the synthetic processor's
+deterministic transient faults and from the kills themselves. Counters are snapshotted right
+before each kill because a killed JVM loses its in-memory meters.
+
+Knobs: `CHAOS_DURATION`, `CHAOS_RATE`, `CHAOS_KILLS`, `CHAOS_RESTART_AFTER`, `CHAOS_KEEP_STACK=1`.
+Output lands in `chaos/out/` (orders, kill timeline, metric snapshots, summary).
+
+## Tests
+
+```bash
+make lint     # spotless (google-java-format)
+make test     # mvn verify: 58 unit tests + 6 integration tests
+```
+
+Unit tests (H2, no Docker): saga state machine transitions and compensation, outbox relay
+ordering and re-send behaviour, idempotent consumer, breaker and time limiter fallbacks, cache
+write-through after commit, atomic and concurrent reservations, retry / breaker / deferred
+queue, deterministic processor.
+
+Integration tests (`e2e-tests`, Testcontainers Redpanda + Postgres + Redis, all three services
+booted in one JVM): an order flows to CONFIRMED end to end, out of stock and declined payment
+paths with stock release, triple delivery of the same event reserves stock once, a payment
+listener stopped mid-flight confirms after restart, and an inventory service restarted with
+twelve orders in flight confirms all of them.
+
+## API
+
+| Method | Path | Service | Notes |
+|---|---|---|---|
+| POST | `/orders` | order | body `{customerId, items:[{sku, quantity, unitPrice}]}`; 202 with the order, `Location` header |
+| GET | `/orders/{id}` | order | `status` PENDING, RESERVED, CONFIRMED, CANCELLED; `reason` OUT_OF_STOCK or PAYMENT_DECLINED |
+| GET | `/stock/{sku}` | order | live value from inventory, or `source: cache` / `unknown` under the breaker |
+| GET | `/stock/{sku}` | inventory | cache first, database on miss |
+| PUT | `/stock/{sku}` | inventory | body `{available}`; creates or restocks |
+| GET | `/actuator/health/readiness`, `/actuator/prometheus`, `/actuator/circuitbreakers` | all | probes and metrics |
+
+Customers whose id ends with `-declined` and amounts above 10000 are declined by the processor.
+
+## Topics
+
+| Topic | Producer | Consumers |
+|---|---|---|
+| `order.created` | order | inventory |
+| `inventory.reserved` | inventory | order, payment |
+| `inventory.rejected` | inventory | order |
+| `payment.completed` | payment | order |
+| `payment.failed` | payment | order |
+| `order.cancelled` | order | inventory |
+
+Three partitions each, keyed by order id, JSON payloads, `x-correlation-id` and `event-id`
+headers. Topics are created on startup by the first service up.
+
+## CI
+
+`.gitlab-ci.yml` defines three stages:
+
+1. **test**: `maven:3.9-eclipse-temurin-21` with a docker-in-docker service so Testcontainers can
+   run the integration tests; JUnit reports and the executable jars are kept as artifacts.
+2. **build**: a matrix job per service builds the multi-stage Dockerfile and pushes
+   `$CI_REGISTRY_IMAGE/<service>:<short sha>` (and `latest` on the default branch).
+3. **chaos**: runs `make chaos` against the compose stack on merge requests and the default
+   branch and keeps `chaos/out/` as an artifact; the job fails if any order failed.
+
+`.github/workflows/ci.yml` mirrors the same three jobs.
+
+## Layout
+
+```
+common/             events, outbox, idempotency, correlation, metrics
+order-service/      saga, orders API, stock check client
+inventory-service/  reservations, Redis cache, stock API
+payment-service/    authorizer, deferred queue, synthetic processor
+e2e-tests/          Testcontainers integration tests
+deploy/             docker-compose.yml, postgres-init.sql
+chaos/              run.sh, loadgen.py, report.py
+```
