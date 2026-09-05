@@ -15,18 +15,21 @@ class OrderStateMachineTest {
 
   @Test
   void happyPathReservesThenConfirms() {
-    Transition reserved = OrderStateMachine.apply(OrderStatus.PENDING, SagaEvent.INVENTORY_RESERVED).orElseThrow();
+    Transition reserved =
+        OrderStateMachine.apply(OrderStatus.PENDING, SagaEvent.INVENTORY_RESERVED).orElseThrow();
     assertThat(reserved.to()).isEqualTo(OrderStatus.RESERVED);
     assertThat(reserved.releaseInventory()).isFalse();
 
-    Transition confirmed = OrderStateMachine.apply(reserved.to(), SagaEvent.PAYMENT_COMPLETED).orElseThrow();
+    Transition confirmed =
+        OrderStateMachine.apply(reserved.to(), SagaEvent.PAYMENT_COMPLETED).orElseThrow();
     assertThat(confirmed.to()).isEqualTo(OrderStatus.CONFIRMED);
     assertThat(confirmed.reason()).isNull();
   }
 
   @Test
   void outOfStockCancelsWithoutCompensation() {
-    Transition t = OrderStateMachine.apply(OrderStatus.PENDING, SagaEvent.INVENTORY_REJECTED).orElseThrow();
+    Transition t =
+        OrderStateMachine.apply(OrderStatus.PENDING, SagaEvent.INVENTORY_REJECTED).orElseThrow();
     assertThat(t.to()).isEqualTo(OrderStatus.CANCELLED);
     assertThat(t.reason()).isEqualTo(OrderStateMachine.OUT_OF_STOCK);
     assertThat(t.releaseInventory()).isFalse();
@@ -34,7 +37,8 @@ class OrderStateMachineTest {
 
   @Test
   void declinedPaymentCancelsAndReleasesReservation() {
-    Transition t = OrderStateMachine.apply(OrderStatus.RESERVED, SagaEvent.PAYMENT_FAILED).orElseThrow();
+    Transition t =
+        OrderStateMachine.apply(OrderStatus.RESERVED, SagaEvent.PAYMENT_FAILED).orElseThrow();
     assertThat(t.to()).isEqualTo(OrderStatus.CANCELLED);
     assertThat(t.reason()).isEqualTo(OrderStateMachine.PAYMENT_DECLINED);
     assertThat(t.releaseInventory()).isTrue();
@@ -49,8 +53,10 @@ class OrderStateMachineTest {
 
   @Test
   void lateReservationEventsAreIgnoredOnceReserved() {
-    assertThat(OrderStateMachine.apply(OrderStatus.RESERVED, SagaEvent.INVENTORY_RESERVED)).isEmpty();
-    assertThat(OrderStateMachine.apply(OrderStatus.RESERVED, SagaEvent.INVENTORY_REJECTED)).isEmpty();
+    assertThat(OrderStateMachine.apply(OrderStatus.RESERVED, SagaEvent.INVENTORY_RESERVED))
+        .isEmpty();
+    assertThat(OrderStateMachine.apply(OrderStatus.RESERVED, SagaEvent.INVENTORY_REJECTED))
+        .isEmpty();
   }
 
   @ParameterizedTest

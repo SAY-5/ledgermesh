@@ -13,9 +13,9 @@ import java.util.Optional;
  * </pre>
  *
  * Payment outcomes arriving before the reservation notice (the two topics are independent) are
- * accepted as well, because a payment can only exist for a reserved order. Anything else,
- * including any event on a terminal order, is ignored: redelivered or late events never move an
- * order backwards.
+ * accepted as well, because a payment can only exist for a reserved order. Anything else, including
+ * any event on a terminal order, is ignored: redelivered or late events never move an order
+ * backwards.
  */
 public final class OrderStateMachine {
 

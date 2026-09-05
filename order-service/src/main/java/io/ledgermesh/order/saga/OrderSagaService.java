@@ -22,8 +22,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * Creates orders and applies saga events. Every state change and the event it emits are written
- * in one transaction through the outbox.
+ * Creates orders and applies saga events. Every state change and the event it emits are written in
+ * one transaction through the outbox.
  */
 @Service
 public class OrderSagaService {

@@ -18,7 +18,10 @@ public class SagaMetrics {
     this.registry = registry;
     for (OrderStatus status : OrderStatus.values()) {
       registry.gauge(
-          "ledgermesh.orders.by_state", java.util.List.of(io.micrometer.core.instrument.Tag.of("state", status.name())), orders, r -> r.countByStatus(status));
+          "ledgermesh.orders.by_state",
+          java.util.List.of(io.micrometer.core.instrument.Tag.of("state", status.name())),
+          orders,
+          r -> r.countByStatus(status));
     }
     this.sagaLatency =
         Timer.builder("ledgermesh.saga.latency")

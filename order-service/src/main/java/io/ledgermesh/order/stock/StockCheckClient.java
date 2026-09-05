@@ -14,8 +14,8 @@ import org.springframework.stereotype.Component;
 
 /**
  * Read-your-writes stock lookup used by the UI right after placing an order. The saga itself never
- * depends on this call: when inventory is slow or down the breaker opens, the time limiter cuts
- * the wait, and the last value seen for the sku is served from a local cache.
+ * depends on this call: when inventory is slow or down the breaker opens, the time limiter cuts the
+ * wait, and the last value seen for the sku is served from a local cache.
  */
 @Component
 public class StockCheckClient {

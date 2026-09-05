@@ -50,12 +50,15 @@ class OrderSagaServiceTest {
     Order order = saga.create("cust-1", List.of(new OrderItem("sku-1", 1, new BigDecimal("5.00"))));
 
     saga.apply(order.getId(), SagaEvent.INVENTORY_RESERVED, "c");
-    assertThat(orders.findById(order.getId()).orElseThrow().getStatus()).isEqualTo(OrderStatus.RESERVED);
+    assertThat(orders.findById(order.getId()).orElseThrow().getStatus())
+        .isEqualTo(OrderStatus.RESERVED);
 
     saga.apply(order.getId(), SagaEvent.PAYMENT_COMPLETED, "c");
     Order confirmed = orders.findById(order.getId()).orElseThrow();
     assertThat(confirmed.getStatus()).isEqualTo(OrderStatus.CONFIRMED);
-    assertThat(outbox.findAll()).extracting(OutboxEvent::getTopic).containsExactly(Topics.ORDER_CREATED);
+    assertThat(outbox.findAll())
+        .extracting(OutboxEvent::getTopic)
+        .containsExactly(Topics.ORDER_CREATED);
   }
 
   @Test
@@ -79,12 +82,22 @@ class OrderSagaServiceTest {
     Order order = saga.create("cust-1", List.of(new OrderItem("sku-1", 1, new BigDecimal("5.00"))));
     saga.apply(order.getId(), SagaEvent.INVENTORY_RESERVED, "c");
 
-    boolean first = idempotent.once("order-service", "evt-9", () -> saga.apply(order.getId(), SagaEvent.PAYMENT_FAILED, "c"));
-    boolean second = idempotent.once("order-service", "evt-9", () -> saga.apply(order.getId(), SagaEvent.PAYMENT_FAILED, "c"));
+    boolean first =
+        idempotent.once(
+            "order-service",
+            "evt-9",
+            () -> saga.apply(order.getId(), SagaEvent.PAYMENT_FAILED, "c"));
+    boolean second =
+        idempotent.once(
+            "order-service",
+            "evt-9",
+            () -> saga.apply(order.getId(), SagaEvent.PAYMENT_FAILED, "c"));
 
     assertThat(first).isTrue();
     assertThat(second).isFalse();
-    assertThat(outbox.findAll()).filteredOn(r -> r.getTopic().equals(Topics.ORDER_CANCELLED)).hasSize(1);
+    assertThat(outbox.findAll())
+        .filteredOn(r -> r.getTopic().equals(Topics.ORDER_CANCELLED))
+        .hasSize(1);
   }
 
   @Test

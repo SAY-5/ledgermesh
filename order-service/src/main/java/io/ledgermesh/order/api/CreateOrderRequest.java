@@ -9,8 +9,7 @@ import jakarta.validation.constraints.NotNull;
 import java.math.BigDecimal;
 import java.util.List;
 
-public record CreateOrderRequest(
-    @NotBlank String customerId, @NotEmpty List<@Valid Item> items) {
+public record CreateOrderRequest(@NotBlank String customerId, @NotEmpty List<@Valid Item> items) {
 
   public record Item(
       @NotBlank String sku,

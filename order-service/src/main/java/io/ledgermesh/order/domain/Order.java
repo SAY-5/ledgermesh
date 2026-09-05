@@ -62,8 +62,7 @@ public class Order {
     this.items = new ArrayList<>(items);
     this.correlationId = correlationId;
     this.status = OrderStatus.PENDING;
-    this.amount =
-        items.stream().map(OrderItem::lineTotal).reduce(BigDecimal.ZERO, BigDecimal::add);
+    this.amount = items.stream().map(OrderItem::lineTotal).reduce(BigDecimal.ZERO, BigDecimal::add);
     this.createdAt = now;
     this.updatedAt = now;
   }

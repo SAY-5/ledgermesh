@@ -16,8 +16,8 @@ import org.springframework.stereotype.Component;
 
 /**
  * Consumes reservation and payment outcomes. Offsets are committed per record after the handler
- * returns, so a process killed mid-flight sees the record again and the idempotent consumer
- * decides whether it still needs applying.
+ * returns, so a process killed mid-flight sees the record again and the idempotent consumer decides
+ * whether it still needs applying.
  */
 @Component
 public class SagaEventListener {
