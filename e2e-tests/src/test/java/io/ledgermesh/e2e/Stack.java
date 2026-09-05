@@ -9,6 +9,10 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.math.BigDecimal;
 import java.net.ServerSocket;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -19,7 +23,7 @@ import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.redpanda.RedpandaContainer;
 import org.testcontainers.utility.DockerImageName;
 
@@ -34,8 +38,7 @@ public final class Stack {
       new RedpandaContainer(
           DockerImageName.parse("redpandadata/redpanda:v24.3.18")
               .asCompatibleSubstituteFor("docker.redpanda.com/redpandadata/redpanda"));
-  static final PostgreSQLContainer<?> POSTGRES =
-      new PostgreSQLContainer<>("postgres:16-alpine").withInitScript("init-databases.sql");
+  static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer("postgres:16-alpine");
   static final GenericContainer<?> REDIS =
       new GenericContainer<>("redis:7-alpine").withExposedPorts(6379);
 
@@ -60,6 +63,7 @@ public final class Stack {
     REDPANDA.start();
     POSTGRES.start();
     REDIS.start();
+    createDatabases("orders", "inventory", "payments");
     orderPort = freePort();
     inventoryPort = freePort();
     paymentPort = freePort();
@@ -118,6 +122,19 @@ public final class Stack {
         .web(WebApplicationType.SERVLET)
         .properties(props.toArray(String[]::new))
         .run();
+  }
+
+  private static void createDatabases(String... names) {
+    try (Connection connection =
+            DriverManager.getConnection(
+                POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword());
+        Statement statement = connection.createStatement()) {
+      for (String name : names) {
+        statement.execute("CREATE DATABASE " + name);
+      }
+    } catch (SQLException e) {
+      throw new IllegalStateException("could not create service databases", e);
+    }
   }
 
   static String jdbcUrl(String database) {
