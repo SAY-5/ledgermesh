@@ -1,0 +1,80 @@
+stages:
+  - test
+  - build
+  - chaos
+
+variables:
+  MAVEN_OPTS: "-Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository -Djava.awt.headless=true"
+  MAVEN_CLI_OPTS: "-B --no-transfer-progress"
+  DOCKER_HOST: tcp://docker:2376
+  DOCKER_TLS_CERTDIR: "/certs"
+  DOCKER_TLS_VERIFY: "1"
+  DOCKER_CERT_PATH: "/certs/client"
+  TESTCONTAINERS_HOST_OVERRIDE: docker
+  IMAGE_TAG: $CI_COMMIT_SHORT_SHA
+
+default:
+  cache:
+    key: maven-$CI_COMMIT_REF_SLUG
+    paths:
+      - .m2/repository
+
+test:
+  stage: test
+  image: maven:3.9-eclipse-temurin-21
+  services:
+    - name: docker:27-dind
+      alias: docker
+  script:
+    - mvn $MAVEN_CLI_OPTS verify
+  artifacts:
+    when: always
+    reports:
+      junit:
+        - "**/target/surefire-reports/TEST-*.xml"
+        - "**/target/failsafe-reports/TEST-*.xml"
+    paths:
+      - "**/target/*-exec.jar"
+    expire_in: 1 week
+
+.build-image:
+  stage: build
+  image: docker:27
+  services:
+    - name: docker:27-dind
+      alias: docker
+  needs: ["test"]
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - docker build --file "$SERVICE/Dockerfile"
+        --tag "$CI_REGISTRY_IMAGE/$SERVICE:$IMAGE_TAG"
+        --tag "$CI_REGISTRY_IMAGE/$SERVICE:latest" .
+    - docker push "$CI_REGISTRY_IMAGE/$SERVICE:$IMAGE_TAG"
+    - if [ "$CI_COMMIT_BRANCH" = "$CI_DEFAULT_BRANCH" ]; then docker push "$CI_REGISTRY_IMAGE/$SERVICE:latest"; fi
+
+build:
+  extends: .build-image
+  parallel:
+    matrix:
+      - SERVICE: [order-service, inventory-service, payment-service]
+
+chaos:
+  stage: chaos
+  image: docker:27
+  services:
+    - name: docker:27-dind
+      alias: docker
+  needs: ["test"]
+  before_script:
+    - apk add --no-cache bash curl python3 make docker-cli-compose
+  script:
+    - make chaos
+  artifacts:
+    when: always
+    paths:
+      - chaos/out/
+    expire_in: 1 week
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
