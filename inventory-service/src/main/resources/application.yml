@@ -59,6 +59,7 @@ resilience4j:
         wait-duration-in-open-state: 5s
         automatic-transition-from-open-to-half-open-enabled: true
         register-health-indicator: true
+        allow-health-indicator-to-fail: false
 
 management:
   endpoints:
