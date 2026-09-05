@@ -1,0 +1,84 @@
+server:
+  port: ${PORT:8082}
+  shutdown: graceful
+
+spring:
+  application:
+    name: inventory-service
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/inventory}
+    username: ${DB_USER:ledgermesh}
+    password: ${DB_PASSWORD:ledgermesh}
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 500ms
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP:localhost:19092}
+    producer:
+      acks: all
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      properties:
+        enable.idempotence: true
+        delivery.timeout.ms: 30000
+    consumer:
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      properties:
+        max.poll.interval.ms: 300000
+        session.timeout.ms: 10000
+    listener:
+      ack-mode: record
+      concurrency: 3
+  lifecycle:
+    timeout-per-shutdown-phase: 10s
+
+ledgermesh:
+  cache:
+    ttl: 60s
+  inventory:
+    seed: ${STOCK_SEED:SKU-ALPHA=100000,SKU-BRAVO=100000,SKU-CHARLIE=100000,SKU-SCARCE=40}
+  outbox:
+    poll-ms: 200
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      redis:
+        sliding-window-size: 10
+        minimum-number-of-calls: 4
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 5s
+        automatic-transition-from-open-to-half-open-enabled: true
+        register-health-indicator: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,circuitbreakers
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  health:
+    circuitbreakers:
+      enabled: true
+    redis:
+      enabled: false
+  metrics:
+    tags:
+      service: inventory-service
+
+logging:
+  pattern:
+    level: "%5p [%X{correlationId:-}]"
