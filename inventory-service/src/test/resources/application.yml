@@ -1,0 +1,36 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:inventory;DB_CLOSE_DELAY=-1
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+  kafka:
+    bootstrap-servers: localhost:1
+    admin:
+      auto-create: false
+    listener:
+      auto-startup: false
+  data:
+    redis:
+      host: localhost
+      port: 1
+
+ledgermesh:
+  outbox:
+    enabled: false
+  cache:
+    ttl: 45s
+  inventory:
+    seed: ""
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      redis:
+        sliding-window-size: 10
+        minimum-number-of-calls: 3
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 60s
+        automatic-transition-from-open-to-half-open-enabled: false
