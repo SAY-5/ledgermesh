@@ -3,6 +3,7 @@ package io.ledgermesh.payment.authorize;
 import io.ledgermesh.common.events.InventoryReserved;
 import io.ledgermesh.common.events.PaymentCompleted;
 import io.ledgermesh.common.events.PaymentFailed;
+import io.ledgermesh.common.events.PaymentRequested;
 import io.ledgermesh.common.outbox.OutboxWriter;
 import io.ledgermesh.payment.domain.Payment;
 import io.ledgermesh.payment.domain.PaymentRepository;
@@ -80,6 +81,60 @@ public class PaymentService {
                         correlationId,
                         clock.instant(),
                         clock.instant().plus(graceBeforeSweep))));
+  }
+
+  /**
+   * Answers a re-drive from the order service. A settled payment has its outcome event emitted
+   * again under a fresh event id, since the first copy evidently never applied; an open payment is
+   * attempted right away; an unknown one is recorded from the request and attempted.
+   */
+  public PaymentStatus requestAgain(PaymentRequested event, String correlationId) {
+    Payment payment =
+        tx.execute(
+            status ->
+                payments
+                    .findById(event.orderId())
+                    .orElseGet(
+                        () ->
+                            payments.save(
+                                new Payment(
+                                    event.orderId(),
+                                    event.customerId(),
+                                    event.amount(),
+                                    correlationId,
+                                    clock.instant(),
+                                    clock.instant()))));
+    if (payment.getStatus().isOpen()) {
+      meters.counter("ledgermesh.payments.redriven", "state", "open").increment();
+      return attempt(event.orderId(), true).orElse(payment.getStatus());
+    }
+    tx.executeWithoutResult(status -> reemit(payment));
+    meters.counter("ledgermesh.payments.redriven", "state", "settled").increment();
+    log.info(
+        "payment for order {} already {}, outcome re-emitted",
+        event.orderId(),
+        payment.getStatus());
+    return payment.getStatus();
+  }
+
+  private void reemit(Payment payment) {
+    if (payment.getStatus() == PaymentStatus.AUTHORIZED) {
+      outbox.append(
+          new PaymentCompleted(
+              UUID.randomUUID().toString(),
+              payment.getOrderId(),
+              payment.getCorrelationId(),
+              clock.instant(),
+              payment.getAuthorizationCode()));
+    } else {
+      outbox.append(
+          new PaymentFailed(
+              UUID.randomUUID().toString(),
+              payment.getOrderId(),
+              payment.getCorrelationId(),
+              clock.instant(),
+              payment.getReason()));
+    }
   }
 
   /** Authorizes an open payment and commits the outcome. Returns the final status if any. */

@@ -3,6 +3,7 @@ package io.ledgermesh.payment.messaging;
 import io.ledgermesh.common.correlation.CorrelationId;
 import io.ledgermesh.common.events.EventCodec;
 import io.ledgermesh.common.events.InventoryReserved;
+import io.ledgermesh.common.events.PaymentRequested;
 import io.ledgermesh.common.events.Topics;
 import io.ledgermesh.common.idempotency.IdempotentConsumer;
 import io.ledgermesh.payment.authorize.PaymentService;
@@ -10,7 +11,10 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 
-/** Records the payment idempotently, then authorizes it. */
+/**
+ * Records the payment idempotently, then authorizes it. Re-drive requests from the order service
+ * are answered with the outcome on file or a fresh attempt.
+ */
 @Component
 public class PaymentEventListener {
 
@@ -38,6 +42,18 @@ public class PaymentEventListener {
       if (recorded) {
         payments.attempt(event.orderId());
       }
+    } finally {
+      CorrelationId.clear();
+    }
+  }
+
+  @KafkaListener(id = "payment-requested", topics = Topics.PAYMENT_REQUESTED, groupId = CONSUMER)
+  public void onPaymentRequested(ConsumerRecord<String, String> record) {
+    PaymentRequested event = codec.decode(record.value(), PaymentRequested.class);
+    String correlationId = CorrelationId.fromHeaders(record.headers(), event.correlationId());
+    CorrelationId.bind(correlationId);
+    try {
+      idempotent.once(CONSUMER, event.eventId(), () -> payments.requestAgain(event, correlationId));
     } finally {
       CorrelationId.clear();
     }
