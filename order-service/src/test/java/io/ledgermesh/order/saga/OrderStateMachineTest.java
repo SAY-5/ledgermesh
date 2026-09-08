@@ -59,6 +59,27 @@ class OrderStateMachineTest {
         .isEmpty();
   }
 
+  @Test
+  void reservationTimeoutCancelsAPendingOrderAndReleasesStock() {
+    Transition t =
+        OrderStateMachine.apply(OrderStatus.PENDING, SagaEvent.RESERVATION_TIMEOUT).orElseThrow();
+    assertThat(t.to()).isEqualTo(OrderStatus.CANCELLED);
+    assertThat(t.reason()).isEqualTo(OrderStateMachine.RESERVATION_TIMEOUT);
+    assertThat(t.releaseInventory()).isTrue();
+    assertThat(OrderStateMachine.apply(OrderStatus.RESERVED, SagaEvent.RESERVATION_TIMEOUT))
+        .isEmpty();
+  }
+
+  @Test
+  void paymentTimeoutCancelsAReservedOrderOnly() {
+    Transition t =
+        OrderStateMachine.apply(OrderStatus.RESERVED, SagaEvent.PAYMENT_TIMEOUT).orElseThrow();
+    assertThat(t.to()).isEqualTo(OrderStatus.CANCELLED);
+    assertThat(t.reason()).isEqualTo(OrderStateMachine.PAYMENT_TIMEOUT);
+    assertThat(t.releaseInventory()).isTrue();
+    assertThat(OrderStateMachine.apply(OrderStatus.PENDING, SagaEvent.PAYMENT_TIMEOUT)).isEmpty();
+  }
+
   @ParameterizedTest
   @EnumSource(SagaEvent.class)
   void terminalOrdersNeverMove(SagaEvent event) {

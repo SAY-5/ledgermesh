@@ -7,6 +7,8 @@ import io.ledgermesh.common.idempotency.IdempotentConsumer;
 import io.ledgermesh.common.outbox.OutboxEvent;
 import io.ledgermesh.common.outbox.OutboxEventRepository;
 import io.ledgermesh.order.domain.Order;
+import io.ledgermesh.order.domain.OrderEvent;
+import io.ledgermesh.order.domain.OrderEventRepository;
 import io.ledgermesh.order.domain.OrderItem;
 import io.ledgermesh.order.domain.OrderRepository;
 import io.ledgermesh.order.domain.OrderStatus;
@@ -24,11 +26,13 @@ class OrderSagaServiceTest {
   @Autowired private OrderSagaService saga;
   @Autowired private OrderRepository orders;
   @Autowired private OutboxEventRepository outbox;
+  @Autowired private OrderEventRepository timeline;
   @Autowired private IdempotentConsumer idempotent;
 
   @BeforeEach
   void clean() {
     outbox.deleteAll();
+    timeline.deleteAll();
     orders.deleteAll();
   }
 
@@ -38,6 +42,7 @@ class OrderSagaServiceTest {
 
     assertThat(order.getStatus()).isEqualTo(OrderStatus.PENDING);
     assertThat(order.getAmount()).isEqualByComparingTo("10.00");
+    assertThat(order.getDeadlineAt()).isEqualTo(order.getCreatedAt().plusSeconds(30));
     List<OutboxEvent> rows = outbox.findAll();
     assertThat(rows).hasSize(1);
     assertThat(rows.get(0).getTopic()).isEqualTo(Topics.ORDER_CREATED);
@@ -103,5 +108,28 @@ class OrderSagaServiceTest {
   @Test
   void eventsForUnknownOrdersAreIgnored() {
     assertThat(saga.apply("missing", SagaEvent.PAYMENT_COMPLETED, "c")).isEmpty();
+    assertThat(saga.timeline("missing")).isEmpty();
+  }
+
+  @Test
+  void timelineRecordsEveryStepIncludingIgnoredEvents() {
+    Order order = saga.create("cust-1", List.of(new OrderItem("sku-1", 1, new BigDecimal("5.00"))));
+    saga.apply(order.getId(), SagaEvent.INVENTORY_RESERVED, "c-1");
+    saga.apply(order.getId(), SagaEvent.INVENTORY_RESERVED, "c-2");
+    saga.apply(order.getId(), SagaEvent.PAYMENT_COMPLETED, "c-3");
+
+    List<OrderEvent> events = saga.timeline(order.getId()).orElseThrow();
+
+    assertThat(events)
+        .extracting(OrderEvent::getType)
+        .containsExactly(
+            "CREATED", "INVENTORY_RESERVED", "INVENTORY_RESERVED", "PAYMENT_COMPLETED");
+    assertThat(events)
+        .extracting(OrderEvent::getToStatus)
+        .containsExactly(OrderStatus.PENDING, OrderStatus.RESERVED, null, OrderStatus.CONFIRMED);
+    assertThat(events.get(2).getFromStatus()).isEqualTo(OrderStatus.RESERVED);
+    assertThat(events.get(3).getCorrelationId()).isEqualTo("c-3");
+    assertThat(events).allSatisfy(e -> assertThat(e.getOccurredAt()).isNotNull());
+    assertThat(orders.findById(order.getId()).orElseThrow().getDeadlineAt()).isNull();
   }
 }
