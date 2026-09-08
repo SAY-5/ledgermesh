@@ -18,7 +18,12 @@ import java.util.ArrayList;
 import java.util.List;
 
 @Entity
-@Table(name = "orders", indexes = @Index(name = "ix_orders_status", columnList = "status"))
+@Table(
+    name = "orders",
+    indexes = {
+      @Index(name = "ix_orders_status", columnList = "status"),
+      @Index(name = "ix_orders_deadline", columnList = "status, deadlineAt")
+    })
 public class Order {
 
   @Id
@@ -51,12 +56,23 @@ public class Order {
   @Column(nullable = false)
   private Instant updatedAt;
 
+  /** When the current saga step must have answered; null once the order is terminal. */
+  private Instant deadlineAt;
+
+  @Column(nullable = false)
+  private int redrives;
+
   @Version private long version;
 
   protected Order() {}
 
   public Order(
-      String id, String customerId, List<OrderItem> items, String correlationId, Instant now) {
+      String id,
+      String customerId,
+      List<OrderItem> items,
+      String correlationId,
+      Instant now,
+      Instant deadlineAt) {
     this.id = id;
     this.customerId = customerId;
     this.items = new ArrayList<>(items);
@@ -65,12 +81,21 @@ public class Order {
     this.amount = items.stream().map(OrderItem::lineTotal).reduce(BigDecimal.ZERO, BigDecimal::add);
     this.createdAt = now;
     this.updatedAt = now;
+    this.deadlineAt = deadlineAt;
   }
 
-  public void transition(OrderStatus to, String reason, Instant now) {
+  public void transition(OrderStatus to, String reason, Instant now, Instant deadlineAt) {
     this.status = to;
     this.reason = reason;
     this.updatedAt = now;
+    this.deadlineAt = deadlineAt;
+  }
+
+  /** Extends the current step's deadline after a re-drive was requested. */
+  public void redriven(Instant now, Instant deadlineAt) {
+    this.redrives++;
+    this.updatedAt = now;
+    this.deadlineAt = deadlineAt;
   }
 
   public String getId() {
@@ -107,5 +132,13 @@ public class Order {
 
   public Instant getUpdatedAt() {
     return updatedAt;
+  }
+
+  public Instant getDeadlineAt() {
+    return deadlineAt;
+  }
+
+  public int getRedrives() {
+    return redrives;
   }
 }
