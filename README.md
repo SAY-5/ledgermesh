@@ -140,6 +140,6 @@ order-service/      saga, orders API, stock check client
 inventory-service/  reservations, Redis cache, stock API
 payment-service/    authorizer, deferred queue, synthetic processor
 e2e-tests/          Testcontainers integration tests
-deploy/             docker-compose.yml, postgres-init.sql
+deploy/             docker-compose.yml (Redpanda, Redis, Postgres, three services)
 chaos/              run.sh, loadgen.py, report.py
 ```

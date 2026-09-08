@@ -35,6 +35,6 @@ through failsafe (`*IT` classes).
 ## Adding a service
 
 1. Create a module with the `common` dependency and scan `io.ledgermesh.common`.
-2. Give it its own database (add it to `deploy/postgres-init.sql`) and its own consumer group.
+2. Give it its own database (add it to the `postgres-init` config in `deploy/docker-compose.yml`) and its own consumer group.
 3. Add a multi-stage Dockerfile modelled on the existing ones and a compose entry.
 4. Add it to the `build` matrix in `.gitlab-ci.yml`.

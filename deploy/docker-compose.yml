@@ -14,6 +14,13 @@ x-service: &service
     redis:
       condition: service_healthy
 
+configs:
+  postgres-init:
+    content: |
+      CREATE DATABASE orders;
+      CREATE DATABASE inventory;
+      CREATE DATABASE payments;
+
 services:
   redpanda:
     image: redpandadata/redpanda:v24.3.18
@@ -50,8 +57,9 @@ services:
       POSTGRES_USER: ledgermesh
       POSTGRES_PASSWORD: ledgermesh
       POSTGRES_DB: ledgermesh
-    volumes:
-      - ./postgres-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    configs:
+      - source: postgres-init
+        target: /docker-entrypoint-initdb.d/init.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ledgermesh -d payments"]
       interval: 3s
