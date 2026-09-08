@@ -48,6 +48,8 @@ ledgermesh:
     seed: ${STOCK_SEED:SKU-ALPHA=100000,SKU-BRAVO=100000,SKU-CHARLIE=100000,SKU-SCARCE=40}
   outbox:
     poll-ms: 200
+  dlq:
+    max-attempts: 8
 
 resilience4j:
   circuitbreaker:

@@ -20,6 +20,8 @@ spring:
 ledgermesh:
   outbox:
     enabled: false
+  kafka:
+    metrics: false
   cache:
     ttl: 45s
   inventory:

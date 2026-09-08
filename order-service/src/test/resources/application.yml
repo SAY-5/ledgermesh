@@ -16,6 +16,8 @@ spring:
 ledgermesh:
   outbox:
     enabled: false
+  kafka:
+    metrics: false
   inventory:
     url: http://localhost:1
   saga:

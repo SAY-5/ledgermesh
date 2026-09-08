@@ -3,8 +3,10 @@ package io.ledgermesh.common;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.ledgermesh.common.correlation.CorrelationIdFilter;
+import io.ledgermesh.common.dlq.DlqReplayer;
 import io.ledgermesh.common.events.EventCodec;
 import io.ledgermesh.common.metrics.BreakerTransitionMetrics;
+import io.ledgermesh.common.metrics.KafkaLagMetrics;
 import io.ledgermesh.common.outbox.OutboxEventRepository;
 import io.ledgermesh.common.outbox.OutboxRelay;
 import io.ledgermesh.common.outbox.OutboxRelayScheduler;
@@ -15,6 +17,9 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.kafka.config.KafkaListenerEndpointRegistry;
+import org.springframework.kafka.core.ConsumerFactory;
+import org.springframework.kafka.core.KafkaAdmin;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.scheduling.annotation.EnableScheduling;
 
@@ -58,6 +63,29 @@ public class LedgerMeshCommonConfiguration {
       matchIfMissing = true)
   public OutboxRelayScheduler outboxRelayScheduler(OutboxRelay relay) {
     return new OutboxRelayScheduler(relay);
+  }
+
+  @Bean
+  public DlqReplayer dlqReplayer(
+      ConsumerFactory<String, String> consumers,
+      KafkaTemplate<String, String> kafka,
+      Clock clock,
+      MeterRegistry meters,
+      @Value("${spring.application.name:ledgermesh}") String serviceName) {
+    return new DlqReplayer(consumers, kafka, serviceName, clock, meters);
+  }
+
+  @Bean
+  @ConditionalOnProperty(
+      name = "ledgermesh.kafka.metrics",
+      havingValue = "true",
+      matchIfMissing = true)
+  public KafkaLagMetrics kafkaLagMetrics(
+      KafkaAdmin kafkaAdmin,
+      KafkaListenerEndpointRegistry listeners,
+      MeterRegistry meters,
+      DlqReplayer replayer) {
+    return new KafkaLagMetrics(kafkaAdmin, listeners, meters, replayer.group());
   }
 
   @Bean

@@ -46,6 +46,8 @@ ledgermesh:
     reaper-ms: 5000
   outbox:
     poll-ms: 200
+  dlq:
+    max-attempts: 8
 
 resilience4j:
   circuitbreaker:

@@ -16,6 +16,8 @@ spring:
 ledgermesh:
   outbox:
     enabled: false
+  kafka:
+    metrics: false
   payment:
     sweeper: false
     sweep-grace: 0s

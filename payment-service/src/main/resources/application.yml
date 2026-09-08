@@ -48,6 +48,8 @@ ledgermesh:
     retry-delay: 2s
   outbox:
     poll-ms: 200
+  dlq:
+    max-attempts: 8
 
 resilience4j:
   retry:
