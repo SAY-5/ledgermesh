@@ -38,15 +38,15 @@ export class InventoryService extends Service {
 
   seed(entries: Record<string, number>, now: number): void {
     for (const [sku, available] of Object.entries(entries)) {
-      if (!this.stock.has(sku)) this.restock(sku, available, now);
+      if (!this.stock.has(sku)) this.restock(sku, available, now, true);
     }
   }
 
-  restock(sku: string, available: number, now: number): void {
+  restock(sku: string, available: number, now: number, silent = false): void {
     const item = this.stock.get(sku) ?? { sku, available: 0 };
     item.available = available;
     this.stock.set(sku, item);
-    this.cache.write(sku, available, now);
+    this.cache.write(sku, available, now, undefined, silent);
   }
 
   reserve(lines: OrderLine[], now: number, orderId: string): Outcome {
