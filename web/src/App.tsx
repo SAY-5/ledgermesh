@@ -1,6 +1,8 @@
 import { Hero } from "./components/Hero.tsx";
+import { SagaTrace } from "./components/SagaTrace.tsx";
 import "./styles/map.css";
 import "./styles/hero.css";
+import "./styles/saga.css";
 
 export function App() {
   return (
@@ -9,7 +11,9 @@ export function App() {
         Skip to the demos
       </a>
       <Hero />
-      <main id="main" />
+      <main id="main">
+        <SagaTrace />
+      </main>
     </>
   );
 }
