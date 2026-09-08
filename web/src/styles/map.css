@@ -31,6 +31,10 @@
   stroke-dasharray: 5 7;
 }
 
+.edge-line.redis {
+  stroke: rgba(138, 151, 173, 0.5);
+}
+
 .edge-line.http {
   stroke: rgba(127, 168, 217, 0.45);
   stroke-dasharray: 2 5;
