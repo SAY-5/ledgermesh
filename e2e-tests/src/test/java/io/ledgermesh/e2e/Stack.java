@@ -109,19 +109,21 @@ public final class Stack {
 
   private static ConfigurableApplicationContext boot(
       Class<?> app, String database, int port, String... extra) {
-    List<String> props = new ArrayList<>();
-    props.add("server.port=" + port);
-    props.add("spring.jmx.enabled=false");
-    props.add("spring.main.banner-mode=off");
-    props.add("spring.datasource.url=" + jdbcUrl(database));
-    props.add("spring.datasource.username=" + POSTGRES.getUsername());
-    props.add("spring.datasource.password=" + POSTGRES.getPassword());
-    props.add("spring.kafka.bootstrap-servers=" + REDPANDA.getBootstrapServers());
-    props.addAll(List.of(extra));
+    List<String> args = new ArrayList<>();
+    args.add("--server.port=" + port);
+    args.add("--spring.jmx.enabled=false");
+    args.add("--spring.main.banner-mode=off");
+    args.add("--spring.datasource.url=" + jdbcUrl(database));
+    args.add("--spring.datasource.username=" + POSTGRES.getUsername());
+    args.add("--spring.datasource.password=" + POSTGRES.getPassword());
+    args.add("--spring.kafka.bootstrap-servers=" + REDPANDA.getBootstrapServers());
+    for (String property : extra) {
+      args.add("--" + property);
+    }
+    // Command line arguments outrank application.yml; builder defaults would not.
     return new SpringApplicationBuilder(app)
         .web(WebApplicationType.SERVLET)
-        .properties(props.toArray(String[]::new))
-        .run();
+        .run(args.toArray(String[]::new));
   }
 
   private static void createDatabases(String... names) {
