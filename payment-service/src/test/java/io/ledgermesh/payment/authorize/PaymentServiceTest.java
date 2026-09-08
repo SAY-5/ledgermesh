@@ -10,6 +10,7 @@ import static org.mockito.Mockito.when;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.ledgermesh.common.events.InventoryReserved;
 import io.ledgermesh.common.events.OrderLine;
+import io.ledgermesh.common.events.PaymentRequested;
 import io.ledgermesh.common.events.Topics;
 import io.ledgermesh.common.outbox.OutboxEvent;
 import io.ledgermesh.common.outbox.OutboxEventRepository;
@@ -18,6 +19,7 @@ import io.ledgermesh.payment.domain.PaymentRepository;
 import io.ledgermesh.payment.domain.PaymentStatus;
 import io.ledgermesh.payment.processor.PaymentProcessor;
 import io.ledgermesh.payment.processor.PaymentProcessor.Approved;
+import io.ledgermesh.payment.processor.PaymentProcessor.Declined;
 import io.ledgermesh.payment.processor.ProcessorUnavailableException;
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -114,6 +116,59 @@ class PaymentServiceTest {
 
     assertThat(service.attempt("o5")).isEmpty();
     assertThat(outbox.count()).isEqualTo(1);
+  }
+
+  @Test
+  void redriveOfASettledPaymentReEmitsTheOutcomeWithAFreshEventId() {
+    when(processor.authorize(anyString(), anyString(), any(), anyInt()))
+        .thenReturn(new Approved("AUTH-6"));
+    service.record(reserved("o6"), "c");
+    service.attempt("o6");
+
+    assertThat(service.requestAgain(requested("o6"), "c")).isEqualTo(PaymentStatus.AUTHORIZED);
+
+    List<OutboxEvent> rows = outbox.findAll();
+    assertThat(rows)
+        .extracting(OutboxEvent::getTopic)
+        .containsExactly(Topics.PAYMENT_COMPLETED, Topics.PAYMENT_COMPLETED);
+    assertThat(rows.get(1).getEventId()).isNotEqualTo(rows.get(0).getEventId());
+    assertThat(rows.get(1).getPayload()).contains("AUTH-6");
+    assertThat(payments.findById("o6").orElseThrow().getAttempts()).isEqualTo(1);
+  }
+
+  @Test
+  void redriveOfAnOpenPaymentAttemptsItNow() {
+    when(processor.authorize(anyString(), anyString(), any(), anyInt()))
+        .thenThrow(new ProcessorUnavailableException("outage"));
+    service.record(reserved("o7"), "c");
+    service.attempt("o7");
+    assertThat(payments.findById("o7").orElseThrow().getStatus()).isEqualTo(PaymentStatus.DEFERRED);
+
+    reset(processor);
+    when(processor.authorize(anyString(), anyString(), any(), anyInt()))
+        .thenReturn(new Approved("AUTH-7"));
+    assertThat(service.requestAgain(requested("o7"), "c")).isEqualTo(PaymentStatus.AUTHORIZED);
+    assertThat(outbox.findAll())
+        .extracting(OutboxEvent::getTopic)
+        .containsExactly(Topics.PAYMENT_COMPLETED);
+  }
+
+  @Test
+  void redriveOfAnUnknownPaymentRecordsItFromTheRequestAndAttempts() {
+    when(processor.authorize(anyString(), anyString(), any(), anyInt()))
+        .thenReturn(new Declined("CARD_DECLINED"));
+
+    assertThat(service.requestAgain(requested("o8"), "c")).isEqualTo(PaymentStatus.DECLINED);
+
+    assertThat(payments.findById("o8").orElseThrow().getAmount()).isEqualByComparingTo("12.50");
+    assertThat(outbox.findAll())
+        .extracting(OutboxEvent::getTopic)
+        .containsExactly(Topics.PAYMENT_FAILED);
+  }
+
+  private static PaymentRequested requested(String orderId) {
+    return new PaymentRequested(
+        "req-" + orderId, orderId, "c", Instant.now(), "cust", new BigDecimal("12.50"), 1);
   }
 
   private static InventoryReserved reserved(String orderId) {
