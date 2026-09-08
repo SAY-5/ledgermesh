@@ -3,7 +3,7 @@ FROM maven:3.9-eclipse-temurin-21-alpine AS builder
 WORKDIR /src
 COPY pom.xml .
 COPY common/pom.xml common/
-COPY payment-service/pom.xml payment-service/
+COPY order-service/pom.xml order-service/
 COPY inventory-service/pom.xml inventory-service/
 COPY payment-service/pom.xml payment-service/
 COPY e2e-tests/pom.xml e2e-tests/
