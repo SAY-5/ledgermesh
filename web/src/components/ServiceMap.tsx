@@ -119,7 +119,7 @@ export function ServiceMap({ state = IDLE, className, compact }: Props) {
   return (
     <svg
       className={["service-map", compact ? "service-map-compact" : "", className ?? ""].join(" ")}
-      viewBox="0 0 960 460"
+      viewBox="0 20 960 440"
       role="img"
       aria-labelledby="service-map-title service-map-desc"
     >
@@ -149,7 +149,7 @@ export function ServiceMap({ state = IDLE, className, compact }: Props) {
       {/* broker band */}
       <g className="map-broker">
         <rect x="300" y="60" width="330" height="360" rx="26" />
-        <text x="465" y="46" textAnchor="middle" className="map-broker-label">
+        <text x="465" y="444" textAnchor="middle" className="map-broker-label">
           Redpanda (Kafka) · 6 topics · 3 partitions · keyed by order id
         </text>
       </g>
@@ -214,24 +214,27 @@ export function ServiceMap({ state = IDLE, className, compact }: Props) {
 
       {/* redis attached to inventory */}
       <g className={`map-redis ${state.services["inventory-service"].ready ? "" : "is-detached"}`}>
-        <path d="M 860 100 C 900 100, 900 100, 900 100" className="edge-line" />
-        <rect x="878" y="72" width="70" height="56" rx="12" />
-        <text x="913" y="96" textAnchor="middle" className="node-title">
+        <path d="M 820 152 C 840 190, 860 200, 880 214" className="edge-line redis" />
+        <rect x="868" y="196" width="84" height="64" rx="12" />
+        <text x="910" y="220" textAnchor="middle" className="node-title">
           Redis
         </text>
-        <text x="913" y="114" textAnchor="middle" className="node-sub">
-          stock:{"{sku}"} TTL 60s
+        <text x="910" y="236" textAnchor="middle" className="node-sub">
+          stock:{"{sku}"}
+        </text>
+        <text x="910" y="250" textAnchor="middle" className="node-sub">
+          TTL 60 s
         </text>
       </g>
 
       {/* stock check HTTP call */}
       <g className="map-http">
-        <path d="M 250 190 C 380 60, 520 40, 660 76" className="edge-line http" />
-        <text x="420" y="54" textAnchor="middle" className="edge-label http">
+        <path d="M 250 190 C 380 50, 520 30, 660 76" className="edge-line http" />
+        <text x="440" y="36" textAnchor="middle" className="edge-label http">
           GET /stock/{"{sku}"} · breaker + 800 ms time limit · cache fallback
         </text>
         {state.breakers ? (
-          <text x="420" y="70" textAnchor="middle" className={`edge-breaker state-${state.breakers.inventory}`}>
+          <text x="440" y="52" textAnchor="middle" className={`edge-breaker state-${state.breakers.inventory}`}>
             breaker {state.breakers.inventory}
           </text>
         ) : null}
