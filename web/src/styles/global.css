@@ -277,3 +277,19 @@ button {
     transition-duration: 0.001ms !important;
   }
 }
+
+.skip-link {
+  position: absolute;
+  top: -100px;
+  left: 16px;
+  z-index: 100;
+  padding: 10px 14px;
+  background: var(--copper);
+  color: var(--ink-0);
+  border-radius: var(--radius-s);
+  font-weight: 700;
+}
+
+.skip-link:focus {
+  top: 16px;
+}

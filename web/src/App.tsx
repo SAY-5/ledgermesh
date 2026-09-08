@@ -1,12 +1,15 @@
+import { Hero } from "./components/Hero.tsx";
+import "./styles/map.css";
+import "./styles/hero.css";
+
 export function App() {
   return (
-    <main>
-      <section className="section">
-        <div className="wrap">
-          <p className="eyebrow">LedgerMesh</p>
-          <h1 className="section-title">Kill a service. Every order still settles.</h1>
-        </div>
-      </section>
-    </main>
+    <>
+      <a className="skip-link" href="#saga">
+        Skip to the demos
+      </a>
+      <Hero />
+      <main id="main" />
+    </>
   );
 }
