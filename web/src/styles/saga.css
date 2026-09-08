@@ -1,0 +1,278 @@
+.saga-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 22px;
+}
+
+.saga-controls .btn {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  border-radius: 14px;
+  padding: 10px 14px;
+}
+
+.saga-hint {
+  font-size: 10.5px;
+  color: var(--text-mute);
+  letter-spacing: 0.04em;
+}
+
+.saga-clock {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--slate);
+}
+
+.saga-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 18px;
+}
+
+.saga-ribbon {
+  padding: 18px 22px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.saga-states {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.saga-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px 8px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--rule-strong);
+  color: var(--text-mute);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  transition:
+    border-color 300ms var(--ease-out),
+    color 300ms var(--ease-out),
+    background 300ms var(--ease-out);
+}
+
+.saga-state-index {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--ink-4);
+  font-size: 11px;
+}
+
+.saga-state.is-on {
+  border-color: var(--copper);
+  color: var(--copper-bright);
+  background: var(--copper-ink);
+}
+
+.saga-state.is-on .saga-state-index {
+  background: var(--copper);
+  color: var(--ink-0);
+}
+
+.saga-state.is-bad {
+  border-color: var(--bad);
+  color: var(--bad);
+  background: var(--bad-ink);
+}
+
+.saga-state.is-bad .saga-state-index {
+  background: var(--bad);
+  color: var(--ink-0);
+}
+
+.saga-state small {
+  font-size: 10px;
+  opacity: 0.8;
+}
+
+.saga-order {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.saga-outboxes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.outbox-table {
+  padding: 14px 16px 10px;
+  min-height: 150px;
+}
+
+.outbox-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 8px;
+}
+
+.outbox-title {
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.outbox-tname {
+  font-size: 11px;
+  color: var(--slate);
+}
+
+.outbox-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.outbox-table th {
+  text-align: left;
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  color: var(--text-mute);
+  padding: 4px 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.outbox-table td {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.outbox-table tr.is-pending td:last-child {
+  color: var(--warn);
+}
+
+.outbox-table tr.is-published td:last-child {
+  color: var(--ok);
+}
+
+.outbox-empty td {
+  color: var(--text-mute);
+  font-style: italic;
+}
+
+.saga-ledger {
+  padding: 8px 0;
+  max-height: 460px;
+  overflow: auto;
+}
+
+.ledger {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.ledger-row {
+  display: grid;
+  grid-template-columns: 64px 84px minmax(0, 1fr);
+  gap: 14px;
+  padding: 8px 20px;
+  border-bottom: 1px solid var(--rule);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.ledger-row:last-child {
+  border-bottom: 0;
+}
+
+.ledger-t {
+  color: var(--text-mute);
+  font-size: 12px;
+}
+
+.ledger-src {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--slate);
+}
+
+.ledger-row.src-order-service .ledger-src {
+  color: var(--copper-bright);
+}
+
+.ledger-row.src-inventory-service .ledger-src {
+  color: var(--slate-bright);
+}
+
+.ledger-row.src-payment-service .ledger-src {
+  color: var(--info);
+}
+
+.ledger-row.src-redis .ledger-src {
+  color: var(--bad);
+}
+
+.ledger-row.kind-duplicate .ledger-text,
+.ledger-row.kind-ignored .ledger-text {
+  color: var(--warn);
+}
+
+.ledger-row.kind-compensate .ledger-text,
+.ledger-row.kind-release .ledger-text {
+  color: var(--copper-bright);
+}
+
+.ledger-row.kind-kill .ledger-text {
+  color: var(--bad);
+  font-weight: 700;
+}
+
+.ledger-row.kind-breaker .ledger-text {
+  color: var(--warn);
+}
+
+.ledger-text {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.ledger-empty {
+  color: var(--text-mute);
+  font-style: italic;
+}
+
+@media (max-width: 860px) {
+  .saga-outboxes {
+    grid-template-columns: 1fr;
+  }
+
+  .ledger-row {
+    grid-template-columns: 52px minmax(0, 1fr);
+  }
+
+  .ledger-src {
+    grid-column: 2;
+  }
+
+  .ledger-text {
+    grid-column: 1 / -1;
+  }
+}
