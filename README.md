@@ -27,13 +27,16 @@ drain and asserts every order reached CONFIRMED or a legitimate out of stock CAN
 
 * **order-service** (8081): accepts orders, writes the order and an `order.created` outbox row in
   one transaction, drives the saga `PENDING -> RESERVED -> CONFIRMED | CANCELLED` and emits
-  `order.cancelled` as compensation when a payment is declined. `GET /stock/{sku}` is a
+  `order.cancelled` as compensation when a payment is declined. Every step has a deadline; a
+  reaper cancels reservations that never answer and re-drives silent payments once before
+  cancelling. Each step is appended to a per order timeline. `GET /stock/{sku}` is a
   read-your-writes lookup wrapped in `@CircuitBreaker` + `@TimeLimiter` with a cache fallback.
 * **inventory-service** (8082): reserves stock atomically for all lines of an order, releases it
   on cancellation, serves stock levels from Redis with write-through and TTL.
 * **payment-service** (8083): authorizes against a deterministic synthetic processor behind
   `Retry(CircuitBreaker(TimeLimiter(call)))`; exhaustion defers the payment to a retry queue,
-  never drops it.
+  never drops it. A re-drive from the order service is answered with the outcome on file or a
+  fresh attempt.
 * **common**: event contracts, topic names, transactional outbox relay, idempotent consumer,
   correlation ids, breaker transition metrics.
 
@@ -49,6 +52,7 @@ make up                 # build the three images and start Redpanda, Redis, Post
 curl -s -X POST localhost:8081/orders -H 'content-type: application/json' \
   -d '{"customerId":"cust-1","items":[{"sku":"SKU-ALPHA","quantity":2,"unitPrice":"9.99"}]}'
 curl -s localhost:8081/orders/<id>          # PENDING -> RESERVED -> CONFIRMED
+curl -s localhost:8081/orders/<id>/timeline # every step with a timestamp
 curl -s localhost:8082/stock/SKU-ALPHA      # served from Redis
 curl -s localhost:8081/stock/SKU-ALPHA      # via order-service, "source": "live" | "cache"
 make down
@@ -95,13 +99,14 @@ Output lands in `chaos/out/` (orders, kill timeline, metric snapshots, summary).
 
 ```bash
 make lint     # spotless (google-java-format)
-make test     # mvn verify: 58 unit tests + 6 integration tests
+make test     # mvn verify: 73 unit tests + 6 integration tests
 ```
 
-Unit tests (H2, no Docker): saga state machine transitions and compensation, outbox relay
-ordering and re-send behaviour, idempotent consumer, breaker and time limiter fallbacks, cache
-write-through after commit, atomic and concurrent reservations, retry / breaker / deferred
-queue, deterministic processor.
+Unit tests (H2, no Docker): saga state machine transitions and compensation, deadline reaper
+(silent reservation cancelled with release, silent payment re-driven once then cancelled), the
+timeline endpoint, outbox relay ordering and re-send behaviour, idempotent consumer, breaker and
+time limiter fallbacks, cache write-through after commit, atomic and concurrent reservations,
+retry / breaker / deferred queue, re-drive answers, deterministic processor.
 
 Integration tests (`e2e-tests`, Testcontainers Redpanda + Postgres + Redis, all three services
 booted in one JVM): an order flows to CONFIRMED end to end, out of stock and declined payment
@@ -114,7 +119,8 @@ twelve orders in flight confirms all of them.
 | Method | Path | Service | Notes |
 |---|---|---|---|
 | POST | `/orders` | order | body `{customerId, items:[{sku, quantity, unitPrice}]}`; 202 with the order, `Location` header |
-| GET | `/orders/{id}` | order | `status` PENDING, RESERVED, CONFIRMED, CANCELLED; `reason` OUT_OF_STOCK or PAYMENT_DECLINED |
+| GET | `/orders/{id}` | order | `status` PENDING, RESERVED, CONFIRMED, CANCELLED; `reason` OUT_OF_STOCK, PAYMENT_DECLINED, RESERVATION_TIMEOUT or PAYMENT_TIMEOUT; `deadlineAt` for the current step, `redrives` |
+| GET | `/orders/{id}/timeline` | order | ordered list of `{type, from, to, reason, correlationId, at}`; ignored and late events appear with `to: null` |
 | GET | `/stock/{sku}` | order | live value from inventory, or `source: cache` / `unknown` under the breaker |
 | GET | `/stock/{sku}` | inventory | cache first, database on miss |
 | PUT | `/stock/{sku}` | inventory | body `{available}`; creates or restocks |
@@ -132,6 +138,7 @@ Customers whose id ends with `-declined` and amounts above 10000 are declined by
 | `payment.completed` | payment | order |
 | `payment.failed` | payment | order |
 | `order.cancelled` | order | inventory |
+| `order.payment_requested` | order | payment |
 
 Three partitions each, keyed by order id, JSON payloads, `x-correlation-id` and `event-id`
 headers. Topics are created on startup by the first service up.
@@ -148,6 +155,32 @@ headers. Topics are created on startup by the first service up.
    branch and keeps `chaos/out/` as an artifact; the job fails if any order failed.
 
 `.github/workflows/ci.yml` mirrors the same three jobs.
+
+## Saga deadlines
+
+Every saga step carries a deadline on the order row (`deadlineAt`): `ledgermesh.saga.reservation`
+(default 60 s) for the inventory answer and `ledgermesh.saga.payment` (default 120 s) for the
+payment answer. `StuckOrderReaper` runs every 5 s and handles expired orders through the same
+state machine and outbox as any inbound event:
+
+* PENDING past its deadline: `CANCELLED (RESERVATION_TIMEOUT)` and `order.cancelled` is emitted so
+  a reservation that was made but never reported is released.
+* RESERVED past its deadline, first time: `order.payment_requested` is emitted, the deadline is
+  extended and `redrives` becomes 1. The payment service re-emits the outcome it already has or
+  attempts the payment now.
+* RESERVED past its deadline again: `CANCELLED (PAYMENT_TIMEOUT)` with release.
+
+Timeout cancellations count as failures in the chaos summary, so a deadline that is too tight for
+the stack shows up as a red run rather than a quietly cancelled order.
+
+## Releases
+
+* **v2.0.0**: per step saga deadlines with a stuck order reaper (cancel silent reservations, re-drive
+  silent payments once, then cancel), `order.payment_requested` re-drive topic answered by the
+  payment service, `GET /orders/{id}/timeline`, `deadlineAt` and `redrives` on the order response.
+* **v1.0.0**: three services on Redpanda with a transactional outbox, idempotent consumers, a
+  compensating saga, Redis write-through caching, Resilience4j breakers / retries / time limiters,
+  GitLab CI and the chaos harness (1200 orders, 3 kills, 0 failed or stuck).
 
 ## Layout
 

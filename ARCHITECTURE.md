@@ -34,6 +34,7 @@ change the outcome of any order. This document explains the mechanisms that make
 | `payment.completed` | payment | order | order is CONFIRMED |
 | `payment.failed` | payment | order | order is CANCELLED and compensation is emitted |
 | `order.cancelled` | order | inventory | release the reservation |
+| `order.payment_requested` | order | payment | the payment deadline passed; answer with the outcome on file or attempt now |
 
 Every topic has three partitions and every message is keyed by order id, so all events for one
 order are processed in sequence within a topic.
@@ -75,10 +76,12 @@ example a re-run reservation) cannot change an outcome.
 `OrderStateMachine` is a pure transition table:
 
 ```
-PENDING  + INVENTORY_RESERVED -> RESERVED
-PENDING  + INVENTORY_REJECTED -> CANCELLED (OUT_OF_STOCK)
-RESERVED + PAYMENT_COMPLETED  -> CONFIRMED
-RESERVED + PAYMENT_FAILED     -> CANCELLED (PAYMENT_DECLINED), emit order.cancelled
+PENDING  + INVENTORY_RESERVED  -> RESERVED
+PENDING  + INVENTORY_REJECTED  -> CANCELLED (OUT_OF_STOCK)
+PENDING  + RESERVATION_TIMEOUT -> CANCELLED (RESERVATION_TIMEOUT), emit order.cancelled
+RESERVED + PAYMENT_COMPLETED   -> CONFIRMED
+RESERVED + PAYMENT_FAILED      -> CANCELLED (PAYMENT_DECLINED), emit order.cancelled
+RESERVED + PAYMENT_TIMEOUT     -> CANCELLED (PAYMENT_TIMEOUT), emit order.cancelled
 ```
 
 Payment outcomes are also accepted from PENDING because the two inbound topics are independent
@@ -86,6 +89,29 @@ and a payment can only exist for a reserved order. When a payment is declined th
 writes `order.cancelled` to its outbox in the same transaction as the cancellation; the inventory
 service releases the reserved units, again idempotently. A legitimate CANCELLED (out of stock or
 declined card) is a correct business outcome and is reported separately from failures.
+
+## Deadlines, the reaper and the timeline
+
+The outbox and idempotent consumers guarantee that nothing is lost while every service eventually
+comes back. They do not bound how long "eventually" is, and they cannot help when a message is
+structurally unprocessable or a downstream row was lost outside the system. Deadlines close that
+gap. Each order carries `deadlineAt` for its current step: creation sets it to now plus the
+reservation timeout, the move to RESERVED resets it to now plus the payment timeout, and a terminal
+state clears it.
+
+`StuckOrderReaper` polls `status in (PENDING, RESERVED) and deadlineAt <= now` on a fixed delay.
+A silent reservation is cancelled through the state machine, which also emits `order.cancelled`:
+if inventory did reserve but its notice never applied, the release makes the stock whole; if it
+never reserved, the release is a no-op. A silent payment is first re-driven: `order.payment_requested`
+goes to the payment service, which either re-emits `payment.completed` / `payment.failed` under a
+fresh event id (the first copy evidently never applied) or attempts the payment now (recording it
+from the request when it was never seen). Only a second expiry cancels with `PAYMENT_TIMEOUT`. A
+payment outcome that arrives after that is recorded in the timeline as ignored and left for
+reconciliation; the terminal rule of the state machine still holds.
+
+Every step, including ignored and late events, is appended to `order_event` in the same
+transaction as the change it describes and served by `GET /orders/{id}/timeline`. Because the row
+and the state change commit together, the timeline is exact across restarts and redeliveries.
 
 ## Inventory: atomic reservations and the Redis cache
 
@@ -155,6 +181,8 @@ Every service exposes `/actuator/health/{liveness,readiness}`, `/actuator/promet
 | `ledgermesh.orders.by_state{state}` | order | orders per state |
 | `ledgermesh.orders.transitions{to}` | order | transition counts |
 | `ledgermesh.saga.latency` | order | creation to terminal state, p50/p95/p99 |
+| `ledgermesh.saga.redrives` | order | payments asked for again by the reaper |
+| `ledgermesh.payments.redriven{state}` | payment | re-drives answered for open or settled payments |
 | `ledgermesh.outbox.backlog`, `.published`, `.send.failures` | all | relay health |
 | `ledgermesh.consumer.duplicates` | all | redeliveries ignored |
 | `ledgermesh.breaker.transitions{name,from,to}` | all | breaker history |
