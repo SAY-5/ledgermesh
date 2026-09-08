@@ -74,10 +74,15 @@ export function ChaosRun() {
   });
   const { cluster, running, speed, setSpeed, start, pause, reset } = runner;
   const s = session.current;
-  const stats = cluster.stats();
+  const rawStats = cluster.stats();
   const loadDone = s ? s.load.finished(cluster.now) : false;
   const phase: "idle" | "running" | "draining" | "done" =
     cluster.now === 0 ? "idle" : !loadDone ? "running" : running ? "draining" : "done";
+  // while orders are still moving, open orders are in flight, not stuck; the script only counts
+  // stuck orders once the drain is over
+  const stats =
+    phase === "done" ? rawStats : { ...rawStats, failed: rawStats.cancelledOther, stuck: 0 };
+  const inFlight = rawStats.stuck;
   const elapsed = Math.min(cluster.now, DURATION_MS) / 1000;
 
   const mapState: MapState = useMemo(() => {
@@ -121,7 +126,7 @@ export function ChaosRun() {
   };
 
   const failedTone = stats.failed === 0 ? "is-ok" : "is-bad";
-  const timelineEnd = Math.max(DURATION_MS, cluster.now) + 4000;
+  const timelineEnd = Math.max(DURATION_MS * 1.3, cluster.now + 4000);
 
   return (
     <section className="section" id="chaos" aria-labelledby="chaos-title">
@@ -218,11 +223,11 @@ export function ChaosRun() {
                   : phase === "running"
                     ? `load · t+${elapsed.toFixed(1)} s`
                     : phase === "draining"
-                      ? `draining · ${stats.stuck} open`
+                      ? `draining · ${inFlight} open`
                       : "settled"}
               </span>
               <span className="mono muted">
-                outbox backlog {stats.outboxBacklog} · redis hits {stats.cache.hits}
+                redis hits {stats.cache.hits} · misses {stats.cache.misses}
               </span>
             </div>
             <ServiceMap state={mapState} compact />
@@ -233,12 +238,14 @@ export function ChaosRun() {
             <Stat label="confirmed" value={stats.confirmed} tone="is-ok" />
             <Stat label="cancelled (stock)" value={stats.cancelledStock} />
             <Stat label="failed / stuck" value={stats.failed} tone={failedTone} big />
+            <Stat label="in flight" value={inFlight} />
             <Stat label="retries (with retry ok)" value={stats.retries.successful_with_retry} />
             <Stat label="deferred payments" value={stats.deferred} tone="is-warn" />
             <Stat label="duplicates ignored" value={stats.duplicates} tone="is-warn" />
             <Stat label="probes live / cache" text={`${stats.stockProbes.live} / ${stats.stockProbes.cache}`} />
             <Stat label="saga p50 / p95" text={`${(stats.p50 / 1000).toFixed(1)} / ${(stats.p95 / 1000).toFixed(1)} s`} />
             <Stat label="open payments" value={cluster.payment.openPayments()} />
+            <Stat label="outbox backlog" value={stats.outboxBacklog} />
           </dl>
         </div>
 
@@ -264,7 +271,7 @@ export function ChaosRun() {
             <span className="eyebrow">notable events</span>
             <ol className="ledger">
               <AnimatePresence initial={false}>
-                {(s?.log ?? []).slice(-14).map((t, i) => (
+                {[...(s?.log ?? [])].reverse().slice(0, 14).map((t, i) => (
                   <motion.li
                     key={`${t.t}-${t.kind}-${i}`}
                     className={`ledger-row src-${t.source} kind-${t.kind}`}
