@@ -1,0 +1,265 @@
+.chaos-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.chaos-buttons,
+.chaos-kill-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.speed {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 999px;
+  border: 1px solid var(--rule);
+}
+
+.btn-small {
+  padding: 6px 12px;
+  font-size: 12px;
+  border-color: transparent;
+  background: transparent;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.toggle input[type="checkbox"] {
+  accent-color: var(--copper);
+  width: 16px;
+  height: 16px;
+}
+
+.seed-field input[type="number"] {
+  width: 76px;
+  padding: 6px 8px;
+  border-radius: var(--radius-s);
+  border: 1px solid var(--rule-strong);
+  background: var(--ink-2);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.chaos-note {
+  font-size: 11px;
+  color: var(--text-mute);
+}
+
+.chaos-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+  gap: 18px;
+  align-items: stretch;
+}
+
+.chaos-map {
+  padding: 16px 18px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.chaos-map-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+
+.chaos-counters {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.chaos-stat {
+  padding: 14px 16px 12px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-m);
+  background: rgba(18, 21, 27, 0.6);
+}
+
+.chaos-stat.is-big {
+  grid-column: 1 / -1;
+  padding: 18px 18px 16px;
+  border-color: rgba(127, 191, 143, 0.4);
+  background: var(--ok-ink);
+}
+
+.chaos-stat.is-big dd {
+  font-size: 54px;
+  font-weight: 700;
+}
+
+.chaos-stat.is-big.is-bad {
+  border-color: var(--bad);
+  background: var(--bad-ink);
+}
+
+.chaos-charts {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: 18px;
+  margin-top: 18px;
+}
+
+.chart {
+  padding: 16px 18px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.chart-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.sparkline,
+.timeline {
+  width: 100%;
+  height: auto;
+  display: block;
+  font-family: var(--font-mono);
+}
+
+.sparkline .axis {
+  stroke: var(--rule-strong);
+}
+
+.sparkline .dot {
+  fill: var(--copper-bright);
+  opacity: 0.85;
+}
+
+.sparkline .kill-line {
+  stroke: var(--bad);
+  stroke-dasharray: 3 4;
+  opacity: 0.8;
+}
+
+.sparkline .load-end,
+.timeline .cursor {
+  stroke: var(--slate);
+  stroke-dasharray: 2 4;
+}
+
+.axis-label {
+  font-size: 10px;
+  fill: var(--text-mute);
+}
+
+.timeline .track {
+  fill: rgba(138, 151, 173, 0.12);
+}
+
+.timeline .load {
+  fill: rgba(217, 154, 78, 0.55);
+}
+
+.timeline .drain {
+  fill: rgba(138, 151, 173, 0.35);
+}
+
+.timeline .outage {
+  fill: rgba(217, 112, 92, 0.22);
+  stroke: rgba(217, 112, 92, 0.5);
+}
+
+.timeline .mark-kill {
+  fill: var(--bad);
+}
+
+.timeline .mark-restart {
+  fill: var(--warn);
+}
+
+.timeline .mark-ready {
+  fill: var(--ok);
+}
+
+.timeline .mark-label {
+  font-size: 10px;
+  fill: var(--text-dim);
+}
+
+.chaos-bottom {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 18px;
+  margin-top: 18px;
+}
+
+.chaos-log {
+  padding: 16px 0 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 420px;
+  overflow: auto;
+}
+
+.chaos-log .eyebrow {
+  padding: 0 20px;
+}
+
+.chaos-log .ledger-row {
+  grid-template-columns: 52px 80px minmax(0, 1fr);
+  font-size: 12.5px;
+  padding: 6px 20px;
+}
+
+.chaos-summary {
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.chaos-summary.is-done {
+  border-color: rgba(127, 191, 143, 0.4);
+}
+
+.summary-pre {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-dim);
+  overflow-x: auto;
+}
+
+.chaos-summary.is-done .summary-pre {
+  color: var(--text);
+}
+
+@media (max-width: 960px) {
+  .chaos-grid,
+  .chaos-charts,
+  .chaos-bottom {
+    grid-template-columns: 1fr;
+  }
+}
