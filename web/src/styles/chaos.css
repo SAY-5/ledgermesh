@@ -62,7 +62,7 @@
   display: grid;
   grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
   gap: 18px;
-  align-items: stretch;
+  align-items: start;
 }
 
 .chaos-map {
@@ -103,7 +103,7 @@
 }
 
 .chaos-stat.is-big dd {
-  font-size: 54px;
+  font-size: 48px;
   font-weight: 700;
 }
 
