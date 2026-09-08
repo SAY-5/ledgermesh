@@ -63,6 +63,8 @@ export class OrderService extends Service {
   private lastKnown = new Map<string, { view: StockView; at: number }>();
   private stockCalls: StockCall[] = [];
   latencies: number[] = [];
+  /** terminal transitions with their virtual timestamp, for time based charts */
+  completions: { at: number; ms: number }[] = [];
   transitions = { RESERVED: 0, CONFIRMED: 0, CANCELLED: 0 };
   onTerminal?: (order: Order, now: number) => void;
 
@@ -164,6 +166,7 @@ export class OrderService extends Service {
     }
     if (isTerminal(transition.to)) {
       this.latencies.push(now - order.createdAt);
+      this.completions.push({ at: now, ms: now - order.createdAt });
       this.onTerminal?.(order, now);
     }
     this.env.trace?.({
