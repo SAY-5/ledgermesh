@@ -10,6 +10,7 @@ import java.time.Instant;
 public sealed interface DomainEvent
     permits OrderCreated,
         OrderCancelled,
+        PaymentRequested,
         InventoryReserved,
         InventoryRejected,
         PaymentCompleted,
