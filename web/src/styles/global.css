@@ -128,7 +128,7 @@ button {
 
 .section-head {
   display: grid;
-  grid-template-columns: 160px minmax(0, 1fr);
+  grid-template-columns: 200px minmax(0, 1fr);
   gap: 18px clamp(18px, 3vw, 40px);
   align-items: start;
   margin-bottom: clamp(28px, 5vw, 56px);
@@ -142,7 +142,7 @@ button {
   text-transform: uppercase;
   padding-top: 14px;
   border-top: 1px solid var(--copper);
-  white-space: nowrap;
+  line-height: 1.6;
 }
 
 .section-title {
