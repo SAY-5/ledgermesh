@@ -18,6 +18,11 @@ ledgermesh:
     enabled: false
   inventory:
     url: http://localhost:1
+  saga:
+    reservation: 30s
+    payment: 45s
+    max-redrives: 1
+    reaper: false
 
 resilience4j:
   circuitbreaker:

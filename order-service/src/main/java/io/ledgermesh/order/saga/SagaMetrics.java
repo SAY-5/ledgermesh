@@ -37,4 +37,8 @@ public class SagaMetrics {
   public void completed(Duration elapsed) {
     sagaLatency.record(elapsed);
   }
+
+  public void redriven() {
+    registry.counter("ledgermesh.saga.redrives").increment();
+  }
 }

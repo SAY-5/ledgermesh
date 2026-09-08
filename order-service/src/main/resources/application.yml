@@ -39,6 +39,11 @@ spring:
 ledgermesh:
   inventory:
     url: ${INVENTORY_URL:http://localhost:8082}
+  saga:
+    reservation: ${SAGA_RESERVATION_TIMEOUT:60s}
+    payment: ${SAGA_PAYMENT_TIMEOUT:120s}
+    max-redrives: 1
+    reaper-ms: 5000
   outbox:
     poll-ms: 200
 
