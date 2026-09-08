@@ -230,6 +230,7 @@
   color: var(--bad);
 }
 
+.ledger-row.kind-fallback .ledger-text,
 .ledger-row.kind-duplicate .ledger-text,
 .ledger-row.kind-ignored .ledger-text {
   color: var(--warn);
