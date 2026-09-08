@@ -76,6 +76,9 @@ resilience4j:
       processor:
         timeout-duration: 1s
         cancel-running-future: true
+      processor-deferred:
+        timeout-duration: 5s
+        cancel-running-future: true
 
 management:
   endpoints:

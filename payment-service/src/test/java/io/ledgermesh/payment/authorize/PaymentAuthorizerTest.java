@@ -101,4 +101,19 @@ class PaymentAuthorizerTest {
     assertThat(outcome).isInstanceOf(AuthorizationOutcome.Deferred.class);
     verify(processor, times(0)).authorize(anyString(), anyString(), any(), anyInt());
   }
+
+  @Test
+  void slowProcessorIsCutOnTheListenerPathButCompletesOnTheDeferredPath() {
+    when(processor.authorize(anyString(), anyString(), any(), anyInt()))
+        .thenAnswer(
+            inv -> {
+              Thread.sleep(2000);
+              return new Approved("AUTH-SLOW");
+            });
+    assertThat(authorizer.authorize("o7", "cust", BigDecimal.TEN))
+        .isInstanceOf(AuthorizationOutcome.Deferred.class);
+    breakers.circuitBreaker(PaymentAuthorizer.RESILIENCE_NAME).reset();
+    assertThat(authorizer.authorizeDeferred("o7", "cust", BigDecimal.TEN, 3))
+        .isEqualTo(new AuthorizationOutcome.Authorized("AUTH-SLOW"));
+  }
 }

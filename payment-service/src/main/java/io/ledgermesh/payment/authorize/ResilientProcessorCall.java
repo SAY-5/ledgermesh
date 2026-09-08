@@ -28,6 +28,9 @@ public class ResilientProcessorCall {
 
   public static final String RESILIENCE_NAME = "processor";
 
+  /** Time limiter for sweeper-driven retries, where latency is not user-facing. */
+  public static final String DEFERRED_NAME = "processor-deferred";
+
   private static final Logger log = LoggerFactory.getLogger(ResilientProcessorCall.class);
 
   private final PaymentProcessor processor;
@@ -41,6 +44,28 @@ public class ResilientProcessorCall {
   @CircuitBreaker(name = RESILIENCE_NAME)
   @TimeLimiter(name = RESILIENCE_NAME)
   public CompletableFuture<AuthorizationOutcome> authorize(
+      String orderId, String customerId, BigDecimal amount, AtomicInteger attempts) {
+    return CompletableFuture.supplyAsync(
+        () -> {
+          int attempt = attempts.incrementAndGet();
+          Result result = processor.authorize(orderId, customerId, amount, attempt);
+          return switch (result) {
+            case Approved a -> new AuthorizationOutcome.Authorized(a.authorizationCode());
+            case Declined d -> new AuthorizationOutcome.Declined(d.reason());
+          };
+        },
+        executor);
+  }
+
+  /**
+   * Same decoration for background retries from the deferred queue, but with a longer time budget:
+   * a slow processor answer that would be cut short on the listener path is allowed to complete
+   * here.
+   */
+  @Retry(name = RESILIENCE_NAME, fallbackMethod = "defer")
+  @CircuitBreaker(name = RESILIENCE_NAME)
+  @TimeLimiter(name = DEFERRED_NAME)
+  public CompletableFuture<AuthorizationOutcome> authorizeDeferred(
       String orderId, String customerId, BigDecimal amount, AtomicInteger attempts) {
     return CompletableFuture.supplyAsync(
         () -> {

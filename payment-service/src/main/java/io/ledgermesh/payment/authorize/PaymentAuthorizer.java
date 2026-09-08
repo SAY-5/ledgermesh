@@ -19,4 +19,11 @@ public class PaymentAuthorizer {
   public AuthorizationOutcome authorize(String orderId, String customerId, BigDecimal amount) {
     return call.authorize(orderId, customerId, amount, new AtomicInteger()).join();
   }
+
+  /** Background retry from the deferred queue: same breaker, longer time budget. */
+  public AuthorizationOutcome authorizeDeferred(
+      String orderId, String customerId, BigDecimal amount, int priorAttempts) {
+    return call.authorizeDeferred(orderId, customerId, amount, new AtomicInteger(priorAttempts))
+        .join();
+  }
 }

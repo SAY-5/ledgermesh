@@ -84,12 +84,20 @@ public class PaymentService {
 
   /** Authorizes an open payment and commits the outcome. Returns the final status if any. */
   public Optional<PaymentStatus> attempt(String orderId) {
+    return attempt(orderId, false);
+  }
+
+  /** Background attempts (from the sweeper) get the longer deferred time budget. */
+  public Optional<PaymentStatus> attempt(String orderId, boolean background) {
     Payment payment = payments.findById(orderId).orElse(null);
     if (payment == null || !payment.getStatus().isOpen()) {
       return Optional.empty();
     }
     AuthorizationOutcome outcome =
-        authorizer.authorize(orderId, payment.getCustomerId(), payment.getAmount());
+        background
+            ? authorizer.authorizeDeferred(
+                orderId, payment.getCustomerId(), payment.getAmount(), payment.getAttempts())
+            : authorizer.authorize(orderId, payment.getCustomerId(), payment.getAmount());
     return Optional.of(commit(orderId, outcome));
   }
 
@@ -149,7 +157,7 @@ public class PaymentService {
             List.of(PaymentStatus.NEW, PaymentStatus.DEFERRED), clock.instant());
     int attempted = 0;
     for (Payment payment : due) {
-      if (attempt(payment.getOrderId()).isPresent()) {
+      if (attempt(payment.getOrderId(), true).isPresent()) {
         attempted++;
       }
     }

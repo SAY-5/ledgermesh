@@ -53,18 +53,25 @@ def order(order_id):
     return json.loads(fetch(f"{SERVICES['order-service']}/orders/{order_id}"))
 
 
-def wait_drain(orders_path, timeout):
+def wait_drain(orders_path, stall_window, hard_cap=None):
+    """Wait for every submitted order to settle. Gives up only after `stall_window` seconds
+    without any order reaching a terminal state, or after `hard_cap` seconds in total."""
     with open(orders_path) as fh:
         ids = [o["id"] for o in json.load(fh)["submitted"]]
     pending = set(ids)
-    deadline = time.time() + timeout
-    while pending and time.time() < deadline:
+    started = time.time()
+    last_progress = started
+    hard_deadline = started + (hard_cap if hard_cap else stall_window * 4)
+    while pending and time.time() < hard_deadline and time.time() - last_progress < stall_window:
+        before = len(pending)
         for oid in list(pending):
             try:
                 if order(oid)["status"] in TERMINAL:
                     pending.discard(oid)
             except Exception:  # noqa: BLE001
                 pass
+        if len(pending) < before:
+            last_progress = time.time()
         if pending:
             print(f"drain: {len(pending)} orders still open", flush=True)
             time.sleep(2)
@@ -192,7 +199,7 @@ if __name__ == "__main__":
     if cmd == "snapshot":
         snapshot(sys.argv[2], sys.argv[3])
     elif cmd == "drain":
-        sys.exit(1 if wait_drain(sys.argv[2], float(sys.argv[3])) else 0)
+        sys.exit(1 if wait_drain(sys.argv[2], float(sys.argv[3]), float(sys.argv[4]) if len(sys.argv) > 4 else None) else 0)
     elif cmd == "summary":
         sys.exit(1 if summary(sys.argv[2], sys.argv[3], sys.argv[4]) else 0)
     else:

@@ -9,6 +9,7 @@ RATE="${CHAOS_RATE:-20}"
 KILLS="${CHAOS_KILLS:-3}"
 RESTART_AFTER="${CHAOS_RESTART_AFTER:-5}"
 DRAIN_TIMEOUT="${CHAOS_DRAIN_TIMEOUT:-180}"
+DRAIN_CAP="${CHAOS_DRAIN_CAP:-600}"
 KEEP_STACK="${CHAOS_KEEP_STACK:-0}"
 PROJECT=ledgermesh
 COMPOSE="docker compose -p $PROJECT -f deploy/docker-compose.yml"
@@ -62,7 +63,7 @@ done
 
 wait $LOADGEN
 log "load finished, waiting for the saga backlog to drain"
-python3 chaos/report.py drain "$OUT/orders.json" "$DRAIN_TIMEOUT" || log "drain timed out"
+python3 chaos/report.py drain "$OUT/orders.json" "$DRAIN_TIMEOUT" "$DRAIN_CAP" || log "drain timed out"
 
 echo
 python3 chaos/report.py summary "$OUT/orders.json" "$OUT/snapshots.jsonl" "$OUT/kills.jsonl"
