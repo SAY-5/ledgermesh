@@ -1,5 +1,5 @@
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRunner } from "../hooks/useRunner.ts";
 import { Cluster } from "../sim/cluster.ts";
 import type { Trace, TraceSource } from "../sim/events.ts";
@@ -66,6 +66,11 @@ export function SagaTrace() {
 
   const order = cluster.order.find(cluster.submitted[0]);
   const traces = cluster.traces;
+  const ledgerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = ledgerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [traces.length]);
   const done = !running && cluster.now > 0;
   const outboxes = useMemo(
     () => [
@@ -204,7 +209,7 @@ export function SagaTrace() {
             ))}
           </div>
 
-          <div className="glass saga-ledger" aria-live="polite" aria-label="Trace">
+          <div className="glass saga-ledger" aria-live="polite" aria-label="Trace" ref={ledgerRef}>
             <ol className="ledger">
               <AnimatePresence initial={false}>
                 {traces.map((t: Trace, i: number) => (
