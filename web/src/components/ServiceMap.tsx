@@ -261,7 +261,7 @@ export function ServiceMap({ state = IDLE, className, compact }: Props) {
               {view.note ?? (status === "killed" ? "SIGKILL" : status === "booting" ? "starting JVM" : "ready")}
             </text>
             {node.name === "payment-service" && state.breakers ? (
-              <text x="188" y="48" textAnchor="end" className={`node-breaker state-${state.breakers.processor}`}>
+              <text x="100" y="114" textAnchor="middle" className={`node-breaker state-${state.breakers.processor}`}>
                 processor {state.breakers.processor}
               </text>
             ) : null}
