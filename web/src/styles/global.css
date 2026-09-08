@@ -128,9 +128,9 @@ button {
 
 .section-head {
   display: grid;
-  grid-template-columns: auto 1fr;
+  grid-template-columns: 160px minmax(0, 1fr);
   gap: 18px clamp(18px, 3vw, 40px);
-  align-items: end;
+  align-items: start;
   margin-bottom: clamp(28px, 5vw, 56px);
 }
 
@@ -140,14 +140,24 @@ button {
   letter-spacing: 0.22em;
   color: var(--copper);
   text-transform: uppercase;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--copper);
-  align-self: end;
+  padding-top: 14px;
+  border-top: 1px solid var(--copper);
+  white-space: nowrap;
 }
 
 .section-title {
-  font-size: clamp(30px, 4.6vw, 56px);
-  max-width: 14ch;
+  font-size: clamp(30px, 4.4vw, 54px);
+  max-width: 20ch;
+}
+
+@media (max-width: 720px) {
+  .section-head {
+    grid-template-columns: 1fr;
+  }
+
+  .section-lede {
+    grid-column: 1;
+  }
 }
 
 .section-lede {
