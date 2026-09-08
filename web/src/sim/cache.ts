@@ -32,9 +32,10 @@ export class StockCache {
   }
 
   /** Write-through, called after the owning transaction committed. */
-  write(sku: string, available: number, now: number, orderId?: string): void {
+  write(sku: string, available: number, now: number, orderId?: string, silent = false): void {
     this.entries.set("stock:" + sku, { value: available, expiresAt: now + this.ttlMs });
     this.writes++;
+    if (silent) return;
     this.trace?.({
       t: now,
       source: "redis",
