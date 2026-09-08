@@ -62,7 +62,24 @@ Requirements: JDK 21, Maven 3.9, Docker with Compose, Python 3 (chaos harness).
 make chaos    # alias: make demo
 ```
 
-CHAOS_SUMMARY_PLACEHOLDER
+Measured output of the run recorded in this repository (macOS host, Docker via Colima, three
+kills, restart after 5 s):
+
+```
+LedgerMesh chaos summary
+  load                 60s at 20 orders/s
+  orders submitted     1200
+  confirmed            1162
+  cancelled (stock)    38
+  failed / stuck       0
+  kills                3  (inventory-service @22s, payment-service @40s, inventory-service @56s)
+  saga latency         p50 19955 ms   p95 33136 ms   max 35397 ms
+  breaker transitions  order-service/inventory CLOSED->OPEN x2; order-service/inventory HALF_OPEN->CLOSED x1; order-service/inventory HALF_OPEN->OPEN x2; order-service/inventory OPEN->HALF_OPEN x4
+  retries              with retry 71 ok / 0 exhausted, without retry 1088 ok / 0 failed
+  deferred payments    0
+  duplicate events     1 ignored by idempotent consumers
+  stock probes         {'live': 58, 'cache': 40, 'unknown': 0, 'error': 0}
+```
 
 `failed / stuck` counts orders that did not reach a terminal state, orders cancelled for any
 reason other than stock, and rejected submissions. `cancelled (stock)` are orders for
