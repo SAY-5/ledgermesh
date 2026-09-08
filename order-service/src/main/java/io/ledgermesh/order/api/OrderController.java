@@ -1,9 +1,13 @@
 package io.ledgermesh.order.api;
 
+import io.ledgermesh.order.domain.OrderEvent;
 import io.ledgermesh.order.domain.OrderItem;
+import io.ledgermesh.order.domain.OrderStatus;
 import io.ledgermesh.order.saga.OrderSagaService;
 import jakarta.validation.Valid;
 import java.net.URI;
+import java.time.Instant;
+import java.util.List;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -40,5 +44,32 @@ public class OrderController {
     return saga.find(id)
         .map(order -> ResponseEntity.ok(OrderResponse.from(order)))
         .orElseGet(() -> ResponseEntity.notFound().build());
+  }
+
+  /** Every saga step the order went through, in order, with timestamps. */
+  @GetMapping("/{id}/timeline")
+  public ResponseEntity<List<TimelineEntry>> timeline(@PathVariable String id) {
+    return saga.timeline(id)
+        .map(events -> ResponseEntity.ok(events.stream().map(TimelineEntry::from).toList()))
+        .orElseGet(() -> ResponseEntity.notFound().build());
+  }
+
+  public record TimelineEntry(
+      String type,
+      OrderStatus from,
+      OrderStatus to,
+      String reason,
+      String correlationId,
+      Instant at) {
+
+    static TimelineEntry from(OrderEvent e) {
+      return new TimelineEntry(
+          e.getType(),
+          e.getFromStatus(),
+          e.getToStatus(),
+          e.getReason(),
+          e.getCorrelationId(),
+          e.getOccurredAt());
+    }
   }
 }

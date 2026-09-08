@@ -15,7 +15,9 @@ public record OrderResponse(
     List<Line> items,
     String correlationId,
     Instant createdAt,
-    Instant updatedAt) {
+    Instant updatedAt,
+    Instant deadlineAt,
+    int redrives) {
 
   public record Line(String sku, int quantity, BigDecimal unitPrice) {}
 
@@ -31,6 +33,8 @@ public record OrderResponse(
             .toList(),
         order.getCorrelationId(),
         order.getCreatedAt(),
-        order.getUpdatedAt());
+        order.getUpdatedAt(),
+        order.getDeadlineAt(),
+        order.getRedrives());
   }
 }
