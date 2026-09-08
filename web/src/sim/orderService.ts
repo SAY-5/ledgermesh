@@ -184,7 +184,7 @@ export class OrderService extends Service {
       this.env.trace?.({
         t: now,
         source: "order-service",
-        kind: "breaker",
+        kind: "fallback",
         text: `breaker inventory is ${this.breaker.state}: CallNotPermitted, serving ${sku} from cache`,
       });
       onDone(this.fromCache(sku));
