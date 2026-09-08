@@ -1,8 +1,10 @@
 import { Hero } from "./components/Hero.tsx";
+import { IdempotencyCache } from "./components/IdempotencyCache.tsx";
 import { SagaTrace } from "./components/SagaTrace.tsx";
 import "./styles/map.css";
 import "./styles/hero.css";
 import "./styles/saga.css";
+import "./styles/resilience.css";
 
 export function App() {
   return (
@@ -13,6 +15,7 @@ export function App() {
       <Hero />
       <main id="main">
         <SagaTrace />
+        <IdempotencyCache />
       </main>
     </>
   );
