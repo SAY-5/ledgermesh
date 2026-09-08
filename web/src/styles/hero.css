@@ -1,0 +1,151 @@
+.hero {
+  position: relative;
+  padding-block: clamp(56px, 9vw, 120px) clamp(48px, 6vw, 80px);
+  overflow: hidden;
+}
+
+.hero::before {
+  content: "";
+  position: absolute;
+  inset: auto -20% -40% -20%;
+  height: 70%;
+  background: radial-gradient(50% 60% at 50% 100%, rgba(217, 154, 78, 0.16), transparent 70%);
+  pointer-events: none;
+}
+
+.hero-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  grid-template-areas:
+    "copy map"
+    "stats stats";
+  gap: clamp(28px, 4vw, 56px) clamp(28px, 4vw, 64px);
+  align-items: center;
+}
+
+.hero-copy {
+  grid-area: copy;
+}
+
+.hero-map {
+  grid-area: map;
+  padding: clamp(14px, 2vw, 26px);
+}
+
+.hero-stats {
+  grid-area: stats;
+}
+
+.hero-eyebrow {
+  margin-bottom: 22px;
+}
+
+.hero-title {
+  font-size: clamp(42px, 6.4vw, 88px);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 0.98;
+}
+
+.hero-title-accent {
+  color: var(--copper-bright);
+  font-style: italic;
+  font-weight: 400;
+}
+
+.hero-lede {
+  margin-top: 26px;
+  max-width: 52ch;
+  color: var(--text-dim);
+  font-size: clamp(15px, 1.4vw, 18px);
+}
+
+.hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 32px;
+}
+
+.hero-actions .btn {
+  border-bottom: 1px solid var(--rule-strong);
+}
+
+.hero-actions .btn-copper {
+  border-bottom-color: transparent;
+}
+
+.hero-stats {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0;
+  margin: 0;
+  border-top: 1px solid var(--rule-strong);
+  border-bottom: 1px solid var(--rule);
+}
+
+.hero-stat {
+  padding: 22px 18px 20px;
+  border-right: 1px solid var(--rule);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.hero-stat:last-of-type {
+  border-right: 0;
+}
+
+.hero-stat dt {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--slate);
+}
+
+.hero-stat dd {
+  margin: 0;
+  font-size: clamp(30px, 3.6vw, 48px);
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.hero-stat.is-zero dd {
+  color: var(--ok);
+}
+
+.hero-stat.is-copper dd {
+  color: var(--copper-bright);
+}
+
+.hero-stats-note {
+  grid-column: 1 / -1;
+  padding: 14px 18px;
+  border-top: 1px solid var(--rule);
+  color: var(--text-mute);
+  font-size: 13px;
+}
+
+@media (max-width: 960px) {
+  .hero-grid {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "copy"
+      "map"
+      "stats";
+  }
+
+  .hero-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .hero-stat:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .hero-stat {
+    border-bottom: 1px solid var(--rule);
+  }
+}
