@@ -1,4 +1,4 @@
-/** Seeded PRNG (mulberry32) and a deterministic string hash. No Math.random anywhere in the sim. */
+/** Seeded PRNG (mulberry32) and a deterministic string hash. The sim never uses unseeded randomness. */
 export class Prng {
   private state: number;
 
