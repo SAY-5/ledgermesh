@@ -150,15 +150,6 @@ button {
   max-width: 20ch;
 }
 
-@media (max-width: 720px) {
-  .section-head {
-    grid-template-columns: 1fr;
-  }
-
-  .section-lede {
-    grid-column: 1;
-  }
-}
 
 .section-lede {
   grid-column: 2;
@@ -302,4 +293,14 @@ button {
 
 .skip-link:focus {
   top: 16px;
+}
+
+@media (max-width: 720px) {
+  .section-head {
+    grid-template-columns: 1fr;
+  }
+
+  .section-lede {
+    grid-column: 1;
+  }
 }
