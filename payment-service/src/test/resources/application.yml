@@ -46,4 +46,6 @@ resilience4j:
     instances:
       processor:
         timeout-duration: 300ms
+      processor-deferred:
+        timeout-duration: 5s
         cancel-running-future: true
