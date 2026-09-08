@@ -127,7 +127,8 @@ export class PaymentService extends Service {
     const payment = this.payments.get(orderId);
     if (!payment || !isOpen(payment.status)) return false;
     if (this.calls.some((c) => c.orderId === orderId)) return false;
-    this.startAttempt({ orderId, attempts: 0, phase: "running", resolveAt: now }, now);
+    const call: Call = { orderId, attempts: 0, phase: "running", resolveAt: now };
+    if (this.startAttempt(call, now)) this.calls.push(call);
     return true;
   }
 
@@ -166,8 +167,7 @@ export class PaymentService extends Service {
         continue;
       }
       if (call.phase === "waiting") {
-        this.startAttempt(call, now);
-        if (this.calls.includes(call) || call.phase === "running") remaining.push(call);
+        if (this.startAttempt(call, now)) remaining.push(call);
         continue;
       }
       const result = call.result;
@@ -213,9 +213,10 @@ export class PaymentService extends Service {
     }
   }
 
-  private startAttempt(call: Call, now: number): void {
+  /** Returns true when a processor call is now running for this invocation. */
+  private startAttempt(call: Call, now: number): boolean {
     const payment = this.payments.get(call.orderId);
-    if (!payment || !isOpen(payment.status)) return;
+    if (!payment || !isOpen(payment.status)) return false;
     if (!this.breaker.tryAcquire(now)) {
       // CallNotPermittedException is not in the retry list: fall back to Deferred immediately
       this.retries.failed_without_retry++;
@@ -226,11 +227,8 @@ export class PaymentService extends Service {
         text: `breaker processor is ${this.breaker.state}: CallNotPermitted, deferring instead of retrying`,
         orderId: call.orderId,
       });
-      call.phase = "running";
-      call.resolveAt = now;
-      this.calls = this.calls.filter((c) => c !== call);
       this.commit(call.orderId, { kind: "deferred", reason: "CallNotPermittedException" }, now);
-      return;
+      return false;
     }
     call.attempts++;
     // the processor is keyed on the order id and the attempt number; the row level attempt count
@@ -239,7 +237,6 @@ export class PaymentService extends Service {
     call.result = result;
     call.phase = "running";
     call.resolveAt = now + Math.min(result.latency, TIME_LIMIT_MS);
-    if (!this.calls.includes(call)) this.calls.push(call);
     this.env.trace?.({
       t: now,
       source: "payment-service",
@@ -247,6 +244,7 @@ export class PaymentService extends Service {
       text: `attempt ${call.attempts}: Retry(CircuitBreaker(TimeLimiter(processor.authorize))) for ${payment.amount.toFixed(2)}`,
       orderId: call.orderId,
     });
+    return true;
   }
 
   /** Deterministic synthetic processor: outcome depends only on the order id and the attempt. */
