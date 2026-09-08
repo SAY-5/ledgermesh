@@ -1,0 +1,55 @@
+:root {
+  color-scheme: dark;
+
+  /* ink and paper: the ledger */
+  --ink-0: #08090c;
+  --ink-1: #0c0e12;
+  --ink-2: #12151b;
+  --ink-3: #191d25;
+  --ink-4: #222731;
+  --rule: rgba(138, 151, 173, 0.14);
+  --rule-strong: rgba(138, 151, 173, 0.28);
+
+  /* copper accent */
+  --copper: #d99a4e;
+  --copper-bright: #f0b869;
+  --copper-deep: #a9702c;
+  --copper-ink: rgba(217, 154, 78, 0.14);
+  --copper-glow: rgba(217, 154, 78, 0.35);
+
+  /* cool slate secondary */
+  --slate: #8a97ad;
+  --slate-bright: #b9c3d3;
+  --slate-deep: #4d586b;
+  --slate-ink: rgba(138, 151, 173, 0.12);
+
+  /* semantic */
+  --ok: #7fbf8f;
+  --ok-ink: rgba(127, 191, 143, 0.16);
+  --warn: #e0b55b;
+  --bad: #d9705c;
+  --bad-ink: rgba(217, 112, 92, 0.16);
+  --info: #7fa8d9;
+
+  --text: #ece7de;
+  --text-dim: #a49f95;
+  --text-mute: #6d6a63;
+
+  --font-display: "Zodiak", "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+  --font-body: "Satoshi", "Avenir Next", "Segoe UI", Helvetica, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+
+  --radius-s: 6px;
+  --radius-m: 12px;
+  --radius-l: 22px;
+
+  --glass: linear-gradient(180deg, rgba(34, 39, 49, 0.55), rgba(18, 21, 27, 0.55));
+  --glass-border: 1px solid rgba(185, 195, 211, 0.12);
+  --glass-shadow: 0 30px 80px -40px rgba(0, 0, 0, 0.9), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+
+  --max-w: 1180px;
+  --gutter: clamp(18px, 4vw, 48px);
+}
