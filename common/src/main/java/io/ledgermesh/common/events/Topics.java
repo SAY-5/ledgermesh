@@ -21,5 +21,22 @@ public final class Topics {
     PAYMENT_FAILED
   };
 
+  /** Suffix of the dead letter topic that shadows every business topic. */
+  public static final String DLQ_SUFFIX = ".dlq";
+
   private Topics() {}
+
+  public static String dlq(String topic) {
+    return topic + DLQ_SUFFIX;
+  }
+
+  public static boolean isDlq(String topic) {
+    return topic.endsWith(DLQ_SUFFIX);
+  }
+
+  public static String sourceOf(String dlqTopic) {
+    return isDlq(dlqTopic)
+        ? dlqTopic.substring(0, dlqTopic.length() - DLQ_SUFFIX.length())
+        : dlqTopic;
+  }
 }
