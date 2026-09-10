@@ -258,6 +258,8 @@ prints the overview of all three services at the end of a run.
 
 ## Releases
 
+Every entry in full is in [CHANGELOG.md](CHANGELOG.md).
+
 * **v5.0.0**: `GET /ops/overview` per service (health, consumer lag, dead letter depth, breaker
   states, in flight and stuck sagas), a `ledgermesh.saga.stuck` gauge, a `tight` chaos profile with
   twice the kills and a two second restart, and the overview in the chaos summary.
