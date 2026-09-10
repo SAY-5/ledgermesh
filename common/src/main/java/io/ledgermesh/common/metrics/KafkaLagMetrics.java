@@ -89,7 +89,11 @@ public class KafkaLagMetrics implements DisposableBean {
       for (Map.Entry<String, Set<String>> group : groups.entrySet()) {
         Map<TopicPartition, Long> committed = committed(group.getKey());
         for (String topic : group.getValue()) {
-          gauge(lag, LAG, Tags.of("group", group.getKey(), "topic", topic))
+          gauge(
+                  lag,
+                  group.getKey() + "|" + topic,
+                  LAG,
+                  Tags.of("group", group.getKey(), "topic", topic))
               .set(behind(described.get(topic), committed));
         }
       }
@@ -97,7 +101,7 @@ public class KafkaLagMetrics implements DisposableBean {
           describe(topics.stream().map(Topics::dlq).collect(java.util.stream.Collectors.toSet()));
       Map<TopicPartition, Long> replayed = committed(replayGroup);
       for (String topic : topics) {
-        gauge(depth, DLQ_DEPTH, Tags.of("topic", topic))
+        gauge(depth, topic, DLQ_DEPTH, Tags.of("topic", topic))
             .set(behind(dlqs.get(Topics.dlq(topic)), replayed));
       }
     } catch (InterruptedException e) {
@@ -187,8 +191,8 @@ public class KafkaLagMetrics implements DisposableBean {
     return out;
   }
 
-  private AtomicLong gauge(Map<String, AtomicLong> store, String name, Tags tags) {
-    return store.computeIfAbsent(name + tags, key -> meters.gauge(name, tags, new AtomicLong()));
+  private AtomicLong gauge(Map<String, AtomicLong> store, String key, String name, Tags tags) {
+    return store.computeIfAbsent(key, k -> meters.gauge(name, tags, new AtomicLong()));
   }
 
   @Override

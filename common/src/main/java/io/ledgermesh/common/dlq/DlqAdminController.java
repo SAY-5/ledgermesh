@@ -1,5 +1,6 @@
 package io.ledgermesh.common.dlq;
 
+import io.ledgermesh.common.events.Topics;
 import io.ledgermesh.common.metrics.KafkaLagMetrics;
 import java.util.Map;
 import org.springframework.beans.factory.ObjectProvider;
@@ -15,7 +16,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/admin/dlq")
 public class DlqAdminController {
 
-  public record ReplayResult(String topic, String dlq, int replayed) {}
+  public record ReplayResult(String topic, String dlq, int replayed, int parked) {}
 
   private final DlqReplayer replayer;
   private final ObjectProvider<KafkaLagMetrics> lag;
@@ -25,7 +26,7 @@ public class DlqAdminController {
     this.lag = lag;
   }
 
-  /** Unreplayed dead letters per source topic, as of the last metrics refresh. */
+  /** Dead letters per source topic that this service has not replayed or parked yet. */
   @GetMapping
   public Map<String, Long> depth() {
     KafkaLagMetrics metrics = lag.getIfAvailable();
@@ -35,7 +36,7 @@ public class DlqAdminController {
   @PostMapping("/{topic}/replay")
   public ReplayResult replay(
       @PathVariable String topic, @RequestParam(defaultValue = "100") int max) {
-    int replayed = replayer.replay(topic, max);
-    return new ReplayResult(topic, io.ledgermesh.common.events.Topics.dlq(topic), replayed);
+    DlqReplayer.Replayed outcome = replayer.replay(topic, max);
+    return new ReplayResult(topic, Topics.dlq(topic), outcome.replayed(), outcome.parked());
   }
 }

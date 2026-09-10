@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.ledgermesh.common.correlation.CorrelationIdFilter;
 import io.ledgermesh.common.dlq.DlqReplayer;
+import io.ledgermesh.common.dlq.PoisonMessagePolicy;
 import io.ledgermesh.common.events.EventCodec;
 import io.ledgermesh.common.metrics.BreakerTransitionMetrics;
 import io.ledgermesh.common.metrics.KafkaLagMetrics;
@@ -66,13 +67,20 @@ public class LedgerMeshCommonConfiguration {
   }
 
   @Bean
+  public PoisonMessagePolicy poisonMessagePolicy(
+      @Value("${ledgermesh.dlq.max-replays:3}") int maxReplays) {
+    return new PoisonMessagePolicy(maxReplays);
+  }
+
+  @Bean
   public DlqReplayer dlqReplayer(
       ConsumerFactory<String, String> consumers,
       KafkaTemplate<String, String> kafka,
       Clock clock,
       MeterRegistry meters,
+      PoisonMessagePolicy policy,
       @Value("${spring.application.name:ledgermesh}") String serviceName) {
-    return new DlqReplayer(consumers, kafka, serviceName, clock, meters);
+    return new DlqReplayer(consumers, kafka, serviceName, clock, meters, policy);
   }
 
   @Bean

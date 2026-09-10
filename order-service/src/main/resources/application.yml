@@ -48,6 +48,7 @@ ledgermesh:
     poll-ms: 200
   dlq:
     max-attempts: 8
+    max-replays: 3
 
 resilience4j:
   circuitbreaker:

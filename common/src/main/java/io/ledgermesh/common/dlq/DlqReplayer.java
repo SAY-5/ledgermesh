@@ -28,11 +28,14 @@ import org.springframework.kafka.support.KafkaHeaders;
  * dedicated consumer group, republished with their original key, value and business headers, and
  * only then committed, so a crash mid replay repeats a record rather than dropping it. Every
  * consumer of the source topic sees the replay; the ones that had already applied the event ignore
- * it by event id. Replays are counted in a header so a record that keeps failing is visible.
+ * it by event id. A record that has used up its replays is parked instead of republished, which is
+ * what ends the loop between a topic and its dead letter shadow.
  */
 public class DlqReplayer {
 
-  public static final String REPLAY_COUNT_HEADER = "dlq-replay-count";
+  /** Outcome of one replay run: records put back on the topic, and records left behind. */
+  public record Replayed(int replayed, int parked) {}
+
   public static final String REPLAYED_AT_HEADER = "dlq-replayed-at";
   public static final String GROUP_SUFFIX = "-dlq-replay";
 
@@ -45,37 +48,41 @@ public class DlqReplayer {
   private final String group;
   private final Clock clock;
   private final MeterRegistry meters;
+  private final PoisonMessagePolicy policy;
 
   public DlqReplayer(
       ConsumerFactory<String, String> consumers,
       KafkaTemplate<String, String> kafka,
       String serviceName,
       Clock clock,
-      MeterRegistry meters) {
+      MeterRegistry meters,
+      PoisonMessagePolicy policy) {
     this.consumers = consumers;
     this.kafka = kafka;
     this.group = serviceName + GROUP_SUFFIX;
     this.clock = clock;
     this.meters = meters;
+    this.policy = policy;
   }
 
   public String group() {
     return group;
   }
 
-  /** Replays up to {@code max} dead letters of {@code topic}. Returns how many were republished. */
-  public int replay(String topic, int max) {
+  /** Handles up to {@code max} dead letters of {@code topic}, replaying or parking each. */
+  public Replayed replay(String topic, int max) {
     String dlq = Topics.dlq(Topics.sourceOf(topic));
     Properties overrides = new Properties();
     overrides.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, Integer.toString(Math.max(1, max)));
     overrides.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
     overrides.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
     int replayed = 0;
+    int parked = 0;
     try (Consumer<String, String> consumer =
         consumers.createConsumer(group, null, "replay", overrides)) {
       consumer.subscribe(List.of(dlq));
       Instant idleSince = clock.instant();
-      while (replayed < max) {
+      while (replayed + parked < max) {
         ConsumerRecords<String, String> records = consumer.poll(POLL);
         if (records.isEmpty()) {
           if (!consumer.assignment().isEmpty()
@@ -86,33 +93,57 @@ public class DlqReplayer {
         }
         idleSince = clock.instant();
         for (ConsumerRecord<String, String> record : records) {
-          if (replayed >= max) {
+          if (replayed + parked >= max) {
             break;
           }
-          republish(record);
-          replayed++;
+          if (policy.isPoison(record.headers())) {
+            park(record);
+            parked++;
+          } else {
+            republish(record);
+            replayed++;
+          }
         }
         consumer.commitSync();
       }
     }
-    log.info("replayed {} dead letter(s) from {} to {}", replayed, dlq, Topics.sourceOf(dlq));
-    return replayed;
+    log.info(
+        "replayed {} and parked {} dead letter(s) from {} to {}",
+        replayed,
+        parked,
+        dlq,
+        Topics.sourceOf(dlq));
+    return new Replayed(replayed, parked);
+  }
+
+  private void park(ConsumerRecord<String, String> record) {
+    String target = Topics.sourceOf(record.topic());
+    meters.counter("ledgermesh.dlq.parked", "topic", target).increment();
+    log.warn(
+        "dead letter {}-{}@{} parked after {} replay(s)",
+        record.topic(),
+        record.partition(),
+        record.offset(),
+        PoisonMessagePolicy.replayCount(record.headers()));
   }
 
   private void republish(ConsumerRecord<String, String> record) {
     String target = Topics.sourceOf(record.topic());
-    int count = 0;
+    int count = PoisonMessagePolicy.replayCount(record.headers());
     ProducerRecord<String, String> out = new ProducerRecord<>(target, record.key(), record.value());
     for (Header header : record.headers()) {
-      if (header.key().equals(REPLAY_COUNT_HEADER)) {
-        count = Integer.parseInt(new String(header.value(), StandardCharsets.UTF_8));
-      } else if (!header.key().startsWith(KafkaHeaders.PREFIX)
+      if (!header.key().startsWith(KafkaHeaders.PREFIX)
+          && !header.key().equals(PoisonMessagePolicy.REPLAY_COUNT_HEADER)
           && !header.key().equals(REPLAYED_AT_HEADER)) {
         out.headers().add(header);
       }
     }
-    out.headers().add(REPLAY_COUNT_HEADER, Integer.toString(count + 1).getBytes());
-    out.headers().add(REPLAYED_AT_HEADER, clock.instant().toString().getBytes());
+    out.headers()
+        .add(
+            PoisonMessagePolicy.REPLAY_COUNT_HEADER,
+            Integer.toString(count + 1).getBytes(StandardCharsets.UTF_8));
+    out.headers()
+        .add(REPLAYED_AT_HEADER, clock.instant().toString().getBytes(StandardCharsets.UTF_8));
     try {
       kafka.send(out).get(10, TimeUnit.SECONDS);
     } catch (InterruptedException e) {

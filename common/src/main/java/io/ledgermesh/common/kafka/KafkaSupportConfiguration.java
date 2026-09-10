@@ -22,12 +22,14 @@ import org.springframework.kafka.support.serializer.DeserializationException;
  * while a dependency (database, broker) recovers; once the attempts are used up the record is
  * published to {@code <topic>.dlq} with the original coordinates and the exception in headers, and
  * the partition moves on. Structurally broken payloads skip the retries and go straight to the dead
- * letter topic.
+ * letter topic. Every failed delivery is counted per topic, so the attempts a record burned before
+ * it was dead lettered are visible.
  */
 @Configuration
 public class KafkaSupportConfiguration {
 
   public static final String DLQ_PUBLISHED = "ledgermesh.dlq.published";
+  public static final String DELIVERY_FAILURES = "ledgermesh.consumer.delivery.failures";
 
   @Bean
   public KafkaAdmin.NewTopics ledgermeshTopics() {
@@ -62,6 +64,9 @@ public class KafkaSupportConfiguration {
     DefaultErrorHandler handler = new DefaultErrorHandler(recoverer, backOff);
     handler.addNotRetryableExceptions(
         DeserializationException.class, IllegalArgumentException.class);
+    handler.setRetryListeners(
+        (record, exception, attempt) ->
+            meters.counter(DELIVERY_FAILURES, "topic", record.topic()).increment());
     return handler;
   }
 }
