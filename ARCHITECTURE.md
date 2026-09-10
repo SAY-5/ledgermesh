@@ -71,6 +71,29 @@ The order state machine adds a second layer: a transition is only valid from spe
 terminal orders never move, so even a duplicate that slips through by a different event id (for
 example a re-run reservation) cannot change an outcome.
 
+## Dead letters, replay and lag
+
+Retrying a poisoned record for ever holds its partition and stops every order behind it. Each
+listener is wrapped in an error handler that retries in place with exponential backoff, and then
+gives up: the record is published to `<topic>.dlq` with its original topic, partition, offset and
+exception in headers, the offset is committed and the partition moves on. A payload that cannot be
+decoded is not worth retrying at all and goes straight to the dead letter topic.
+
+Replay is a deliberate operator action. `POST /admin/dlq/{topic}/replay` consumes the dead letter
+topic with a group of its own, republishes each record on the source topic with its original key,
+value and business headers, and commits afterwards, so an interrupted replay repeats rather than
+loses. The consumers that had already applied the event drop the replay on the event id, exactly as
+they drop any other redelivery.
+
+A record that fails, is replayed and fails again would cycle for ever. Every replay stamps
+`dlq-replay-count`; when it reaches `ledgermesh.dlq.max-replays` the replayer parks the record
+instead of republishing it, and the operator sees a parked count instead of a growing loop.
+
+Lag is measured from the broker rather than from the consumer, so it is still readable while a
+service is down: for each listener group, the end offset of every partition minus the committed
+offset. Dead letter depth is the same subtraction for the replay group on the dead letter topic,
+which makes it "records nobody has decided about yet" rather than "records ever dead lettered".
+
 ## Saga and compensation
 
 `OrderStateMachine` is a pure transition table:
@@ -185,6 +208,10 @@ Every service exposes `/actuator/health/{liveness,readiness}`, `/actuator/promet
 | `ledgermesh.payments.redriven{state}` | payment | re-drives answered for open or settled payments |
 | `ledgermesh.outbox.backlog`, `.published`, `.send.failures` | all | relay health |
 | `ledgermesh.consumer.duplicates` | all | redeliveries ignored |
+| `ledgermesh.consumer.delivery.failures{topic}` | all | failed deliveries, retried or dead lettered |
+| `ledgermesh.consumer.lag{group,topic}` | all | end offset minus committed offset |
+| `ledgermesh.dlq.depth{topic}` | all | dead letters waiting for a replay decision |
+| `ledgermesh.dlq.published{topic}`, `.replayed`, `.parked` | all | dead letter traffic |
 | `ledgermesh.breaker.transitions{name,from,to}` | all | breaker history |
 | `ledgermesh.payments.by_state`, `.deferred`, `.outcomes` | payment | deferred queue |
 | `ledgermesh.cache.reads{result}` | inventory | cache hit ratio |

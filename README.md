@@ -99,20 +99,23 @@ Output lands in `chaos/out/` (orders, kill timeline, metric snapshots, summary).
 
 ```bash
 make lint     # spotless (google-java-format)
-make test     # mvn verify: 73 unit tests + 6 integration tests
+make test     # mvn verify: 77 unit tests + 7 integration tests
 ```
 
 Unit tests (H2, no Docker): saga state machine transitions and compensation, deadline reaper
 (silent reservation cancelled with release, silent payment re-driven once then cancelled), the
 timeline endpoint, outbox relay ordering and re-send behaviour, idempotent consumer, breaker and
 time limiter fallbacks, cache write-through after commit, atomic and concurrent reservations,
-retry / breaker / deferred queue, re-drive answers, deterministic processor.
+retry / breaker / deferred queue, re-drive answers, deterministic processor, the replay cap that
+turns a record into a parked poison message.
 
 Integration tests (`e2e-tests`, Testcontainers Redpanda + Postgres + Redis, all three services
 booted in one JVM): an order flows to CONFIRMED end to end, out of stock and declined payment
 paths with stock release, triple delivery of the same event reserves stock once, a payment
-listener stopped mid-flight confirms after restart, and an inventory service restarted with
-twelve orders in flight confirms all of them.
+listener stopped mid-flight confirms after restart, an inventory service restarted with twelve
+orders in flight confirms all of them, and a record that can never be processed reaches the dead
+letter topic after the configured attempts without holding up the record behind it, is replayed
+once, and is parked on the second replay.
 
 ## API
 
@@ -124,6 +127,8 @@ twelve orders in flight confirms all of them.
 | GET | `/stock/{sku}` | order | live value from inventory, or `source: cache` / `unknown` under the breaker |
 | GET | `/stock/{sku}` | inventory | cache first, database on miss |
 | PUT | `/stock/{sku}` | inventory | body `{available}`; creates or restocks |
+| GET | `/admin/dlq` | all | dead letters per source topic that this service has not replayed or parked |
+| POST | `/admin/dlq/{topic}/replay` | all | puts dead letters back on `{topic}`; `max` caps the batch, answer is `{replayed, parked}` |
 | GET | `/actuator/health/readiness`, `/actuator/prometheus`, `/actuator/circuitbreakers` | all | probes and metrics |
 
 Customers whose id ends with `-declined` and amounts above 10000 are declined by the processor.
@@ -141,7 +146,8 @@ Customers whose id ends with `-declined` and amounts above 10000 are declined by
 | `order.payment_requested` | order | payment |
 
 Three partitions each, keyed by order id, JSON payloads, `x-correlation-id` and `event-id`
-headers. Topics are created on startup by the first service up.
+headers. Every topic has a single partition `<topic>.dlq` shadow. Topics are created on startup by
+the first service up.
 
 ## CI
 
@@ -173,8 +179,32 @@ state machine and outbox as any inbound event:
 Timeout cancellations count as failures in the chaos summary, so a deadline that is too tight for
 the stack shows up as a red run rather than a quietly cancelled order.
 
+## Dead letters and lag
+
+Every business topic has a `<topic>.dlq` shadow. A record whose handler keeps failing is retried in
+place with exponential backoff (`ledgermesh.dlq.max-attempts`, default 8), which holds the partition
+while a database or broker recovers; when the attempts run out the record is published to the dead
+letter topic with its original coordinates and the exception in headers, and the partition moves on.
+A payload that cannot be decoded skips the retries. Failed deliveries are counted per topic, so the
+attempts a record burned stay visible after it has left the topic.
+
+`POST /admin/dlq/{topic}/replay?max=100` reads dead letters with a dedicated consumer group,
+republishes each one on its source topic with the original key, value and headers, and only then
+commits, so a crash during a replay repeats a record rather than dropping it. Consumers that already
+applied the event ignore the replay by event id. Each replay stamps a `dlq-replay-count` header;
+once a record has used up `ledgermesh.dlq.max-replays` (default 3) the replayer parks it instead of
+republishing, which is what ends the loop between a topic and its dead letter shadow.
+`GET /admin/dlq` reports what is still waiting.
+
+Two gauges are recomputed from broker offsets every five seconds:
+`ledgermesh.consumer.lag{group,topic}` (end offset minus committed offset over all partitions) and
+`ledgermesh.dlq.depth{topic}` (the same difference for the replay group on the dead letter topic).
+
 ## Releases
 
+* **v3.0.0**: a `<topic>.dlq` shadow for every topic with bounded in place retries,
+  `POST /admin/dlq/{topic}/replay`, a poison message cap that parks a record once its replays are
+  used up, and `ledgermesh.consumer.lag` / `ledgermesh.dlq.depth` gauges read from broker offsets.
 * **v2.0.0**: per step saga deadlines with a stuck order reaper (cancel silent reservations, re-drive
   silent payments once, then cancel), `order.payment_requested` re-drive topic answered by the
   payment service, `GET /orders/{id}/timeline`, `deadlineAt` and `redrives` on the order response.
