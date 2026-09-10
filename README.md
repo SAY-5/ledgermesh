@@ -63,7 +63,8 @@ Requirements: JDK 21, Maven 3.9, Docker with Compose, Python 3 (chaos harness).
 ## Chaos test
 
 ```bash
-make chaos    # alias: make demo
+make chaos        # alias: make demo
+make chaos-tight  # the same run with six kills and a two second restart
 ```
 
 Measured output of the run recorded in this repository (macOS host, Docker via Colima, three
@@ -92,14 +93,16 @@ Retries, deferred payments and breaker transitions come from the synthetic proce
 deterministic transient faults and from the kills themselves. Counters are snapshotted right
 before each kill because a killed JVM loses its in-memory meters.
 
-Knobs: `CHAOS_DURATION`, `CHAOS_RATE`, `CHAOS_KILLS`, `CHAOS_RESTART_AFTER`, `CHAOS_KEEP_STACK=1`.
+Knobs: `CHAOS_PROFILE` (`steady` three kills restarting after 5 s, `tight` six kills restarting
+after 2 s), `CHAOS_DURATION`, `CHAOS_RATE`, `CHAOS_KILLS`, `CHAOS_RESTART_AFTER`,
+`CHAOS_KEEP_STACK=1`, `CHAOS_PYTHON`.
 Output lands in `chaos/out/` (orders, kill timeline, metric snapshots, summary).
 
 ## Tests
 
 ```bash
 make lint     # spotless (google-java-format)
-make test     # mvn verify: 82 unit tests + 10 integration tests
+make test     # mvn verify: 83 unit tests + 12 integration tests
 ```
 
 Unit tests (H2, no Docker): saga state machine transitions and compensation, deadline reaper
@@ -108,7 +111,7 @@ timeline endpoint, outbox relay ordering and re-send behaviour, idempotent consu
 time limiter fallbacks, cache write-through after commit, atomic and concurrent reservations,
 retry / breaker / deferred queue, re-drive answers, deterministic processor, the replay cap that
 turns a record into a parked poison message, the request deduplication store, the relay counting a
-send that never confirmed.
+send that never confirmed, the open and overdue saga counts behind the ops overview.
 
 Integration tests (`e2e-tests`, Testcontainers Redpanda + Postgres + Redis, all three services
 booted in one JVM): an order flows to CONFIRMED end to end, out of stock and declined payment
@@ -119,7 +122,9 @@ letter topic after the configured attempts without holding up the record behind 
 once, and is parked on the second replay. Exactly once at the boundary has a class of its own: the
 same idempotency key twice and two calls racing on one key each place one order and return one body,
 and an outbox row put back into the crash window is sent again, ignored by the consumer, and leaves
-the stock ledger and the payment unchanged.
+the stock ledger and the payment unchanged. The ops overview is checked against a listener that is
+stopped and started again: lag rises and falls, the order shows up as in flight and then does not,
+and the services that do not own the saga report the rest of the page without it.
 
 ## API
 
@@ -131,6 +136,7 @@ the stock ledger and the payment unchanged.
 | GET | `/stock/{sku}` | order | live value from inventory, or `source: cache` / `unknown` under the breaker |
 | GET | `/stock/{sku}` | inventory | cache first, database on miss |
 | PUT | `/stock/{sku}` | inventory | body `{available}`; creates or restocks |
+| GET | `/ops/overview` | all | health, consumer lag, dead letter depth, breaker states and, on the order service, in flight and stuck sagas |
 | GET | `/admin/dlq` | all | dead letters per source topic that this service has not replayed or parked |
 | POST | `/admin/dlq/{topic}/replay` | all | puts dead letters back on `{topic}`; `max` caps the batch, answer is `{replayed, parked}` |
 | GET | `/actuator/health/readiness`, `/actuator/prometheus`, `/actuator/circuitbreakers` | all | probes and metrics |
@@ -221,8 +227,32 @@ Two gauges are recomputed from broker offsets every five seconds:
 `ledgermesh.consumer.lag{group,topic}` (end offset minus committed offset over all partitions) and
 `ledgermesh.dlq.depth{topic}` (the same difference for the replay group on the dead letter topic).
 
+## Ops overview
+
+`GET /ops/overview` is the page to open first during an incident. Every service answers for itself:
+
+```json
+{
+  "service": "order-service",
+  "health": "UP",
+  "consumerLag": { "order-service|inventory.reserved": 0 },
+  "deadLetterDepth": { "order.created": 0 },
+  "breakers": { "inventory": "CLOSED" },
+  "sagas": { "inFlight": 2, "stuck": 0, "byState": { "PENDING": 1, "RESERVED": 1 } }
+}
+```
+
+The numbers are the same gauges the Prometheus endpoint publishes, so the page and the dashboards
+cannot disagree. `sagas` is null on the services that do not own the saga. `stuck` counts open
+orders whose current step has already passed its deadline, which is the number that says the reaper
+is behind rather than idle; it is also published as `ledgermesh.saga.stuck`. The chaos summary
+prints the overview of all three services at the end of a run.
+
 ## Releases
 
+* **v5.0.0**: `GET /ops/overview` per service (health, consumer lag, dead letter depth, breaker
+  states, in flight and stuck sagas), a `ledgermesh.saga.stuck` gauge, a `tight` chaos profile with
+  twice the kills and a two second restart, and the overview in the chaos summary.
 * **v4.0.0**: `Idempotency-Key` on `POST /orders` backed by a request deduplication store written
   in the order's own transaction, and an outbox relay that stamps an attempt before the send so a
   crash between the send and the ack shows up as a counted re-send rather than a second effect.

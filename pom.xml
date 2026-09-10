@@ -13,7 +13,7 @@
 
   <groupId>io.ledgermesh</groupId>
   <artifactId>ledgermesh</artifactId>
-  <version>4.0.0</version>
+  <version>5.0.0</version>
   <packaging>pom</packaging>
   <name>ledgermesh</name>
   <description>Fault tolerant order, inventory and payment microservices on Kafka</description>

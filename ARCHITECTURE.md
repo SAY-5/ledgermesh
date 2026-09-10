@@ -210,7 +210,11 @@ the chaos run reports `failed / stuck 0` while one service is down.
 ## Observability
 
 Every service exposes `/actuator/health/{liveness,readiness}`, `/actuator/prometheus` and
-`/actuator/circuitbreakers`. Custom meters:
+`/actuator/circuitbreakers`, plus `/ops/overview`, which puts health, consumer lag, dead letter
+depth, breaker states and the open and overdue saga counts on one page for that service. The
+overview reads the same gauges the Prometheus endpoint publishes rather than counting separately,
+so an operator reading the page and a dashboard reading the meters see the same numbers. Custom
+meters:
 
 | Meter | Service | Purpose |
 |---|---|---|
@@ -218,6 +222,7 @@ Every service exposes `/actuator/health/{liveness,readiness}`, `/actuator/promet
 | `ledgermesh.orders.transitions{to}` | order | transition counts |
 | `ledgermesh.saga.latency` | order | creation to terminal state, p50/p95/p99 |
 | `ledgermesh.saga.redrives` | order | payments asked for again by the reaper |
+| `ledgermesh.saga.stuck` | order | open orders past the deadline of their current step |
 | `ledgermesh.payments.redriven{state}` | payment | re-drives answered for open or settled payments |
 | `ledgermesh.outbox.backlog`, `.published`, `.send.failures`, `.resends` | all | relay health |
 | `ledgermesh.requests.replayed` | order | answers served from the idempotency store |

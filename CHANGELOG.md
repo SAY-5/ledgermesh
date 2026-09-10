@@ -1,5 +1,13 @@
 # Changelog
 
+## v5.0.0
+
+* `GET /ops/overview` on every service: health, consumer lag, dead letter depth, breaker states
+  and, on the order service, in flight and stuck sagas with the count per state.
+* `ledgermesh.saga.stuck` gauges open orders whose current step has already passed its deadline.
+* A `tight` chaos profile runs the existing harness with six kills and a two second restart, and
+  the chaos summary now ends with the overview of all three services.
+
 ## v4.0.0
 
 * `POST /orders` accepts an `Idempotency-Key`. The first call stores the answer it returned in the
