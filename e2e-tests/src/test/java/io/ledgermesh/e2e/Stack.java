@@ -42,6 +42,9 @@ public final class Stack {
   static final GenericContainer<?> REDIS =
       new GenericContainer<>("redis:7-alpine").withExposedPorts(6379);
 
+  static final int DLQ_ATTEMPTS = 3;
+  static final int DLQ_MAX_REPLAYS = 1;
+
   static final ObjectMapper JSON = new ObjectMapper();
   static final HttpClient HTTP = HttpClient.newHttpClient();
 
@@ -117,6 +120,12 @@ public final class Stack {
     args.add("--spring.datasource.username=" + POSTGRES.getUsername());
     args.add("--spring.datasource.password=" + POSTGRES.getPassword());
     args.add("--spring.kafka.bootstrap-servers=" + REDPANDA.getBootstrapServers());
+    // A short dead letter ladder: a record that always fails is dead lettered in under a second,
+    // and one replay is enough to use up its allowance.
+    args.add("--ledgermesh.dlq.max-attempts=" + DLQ_ATTEMPTS);
+    args.add("--ledgermesh.dlq.initial-backoff-ms=100");
+    args.add("--ledgermesh.dlq.max-backoff-ms=200");
+    args.add("--ledgermesh.dlq.max-replays=" + DLQ_MAX_REPLAYS);
     for (String property : extra) {
       args.add("--" + property);
     }
