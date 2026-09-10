@@ -33,11 +33,13 @@ class OutboxRelayTest {
   @SuppressWarnings("unchecked")
   private final KafkaTemplate<String, String> kafka = mock(KafkaTemplate.class);
 
+  private final SimpleMeterRegistry meters = new SimpleMeterRegistry();
+
   private OutboxRelay relay;
 
   @BeforeEach
   void setUp() {
-    relay = new OutboxRelay(repository, kafka, CLOCK, new SimpleMeterRegistry(), 1000);
+    relay = new OutboxRelay(repository, kafka, CLOCK, meters, 1000);
     repository.save(row("e1", "order-1"));
     repository.save(row("e2", "order-1"));
     repository.save(row("e3", "order-2"));
@@ -71,6 +73,19 @@ class OutboxRelayTest {
 
     when(kafka.send(any(ProducerRecord.class))).thenReturn(acked());
     assertThat(relay.relayPending()).isEqualTo(2);
+    assertThat(repository.countByPublishedAtIsNull()).isZero();
+  }
+
+  @Test
+  void countsARowWhoseLastAttemptNeverConfirmedAsAResend() {
+    when(kafka.send(any(ProducerRecord.class))).thenReturn(acked());
+    OutboxEvent crashed = repository.findAll().get(0);
+    crashed.markAttempted(CLOCK.instant());
+    repository.saveAndFlush(crashed);
+
+    assertThat(relay.relayPending()).isEqualTo(3);
+
+    assertThat(meters.counter("ledgermesh.outbox.resends").count()).isEqualTo(1);
     assertThat(repository.countByPublishedAtIsNull()).isZero();
   }
 

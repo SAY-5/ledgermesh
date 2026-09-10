@@ -15,8 +15,10 @@ import org.springframework.kafka.core.KafkaTemplate;
 
 /**
  * Polls unpublished outbox rows and pushes them to Kafka one at a time, in insertion order. A row
- * is marked published only after the broker acknowledged it. If the process dies between the send
- * and the mark, the row is sent again on the next run; consumers de-duplicate on event id.
+ * is stamped as attempted before the send and marked published only after the broker acknowledged
+ * it. A row that comes back attempted but unpublished is exactly the crash window between the two:
+ * it may or may not have reached the broker, so it is sent again and counted as a re-send.
+ * Consumers de-duplicate on event id, which is what keeps the effect single.
  */
 public class OutboxRelay {
 
@@ -28,6 +30,7 @@ public class OutboxRelay {
   private final long sendTimeoutMs;
   private final Counter published;
   private final Counter failures;
+  private final Counter resends;
 
   public OutboxRelay(
       OutboxEventRepository repository,
@@ -41,6 +44,7 @@ public class OutboxRelay {
     this.sendTimeoutMs = sendTimeoutMs;
     this.published = registry.counter("ledgermesh.outbox.published");
     this.failures = registry.counter("ledgermesh.outbox.send.failures");
+    this.resends = registry.counter("ledgermesh.outbox.resends");
     registry.gauge("ledgermesh.outbox.backlog", repository, r -> r.countByPublishedAtIsNull());
   }
 
@@ -49,6 +53,15 @@ public class OutboxRelay {
     List<OutboxEvent> batch = repository.findTop200ByPublishedAtIsNullOrderByIdAsc();
     int sent = 0;
     for (OutboxEvent row : batch) {
+      if (row.getAttemptedAt() != null) {
+        resends.increment();
+        log.warn(
+            "re-sending event {} on {}: the last attempt never confirmed",
+            row.getEventId(),
+            row.getTopic());
+      }
+      row.markAttempted(clock.instant());
+      repository.saveAndFlush(row);
       if (!send(row)) {
         break;
       }

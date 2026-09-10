@@ -13,8 +13,9 @@ import org.hibernate.type.SqlTypes;
 
 /**
  * A row written in the same database transaction as the business change it announces. The relay
- * publishes rows in id order and stamps {@code publishedAt} only after the broker acknowledged the
- * write, so a crash anywhere in between results in a re-send, never a loss.
+ * publishes rows in id order, stamps {@code attemptedAt} before the send and {@code publishedAt}
+ * only after the broker acknowledged the write, so a crash anywhere in between results in a
+ * re-send, never a loss, and the row itself says that its last attempt did not finish.
  */
 @Entity
 @Table(
@@ -47,6 +48,8 @@ public class OutboxEvent {
 
   @Column(nullable = false)
   private Instant createdAt;
+
+  private Instant attemptedAt;
 
   private Instant publishedAt;
 
@@ -101,8 +104,16 @@ public class OutboxEvent {
     return createdAt;
   }
 
+  public Instant getAttemptedAt() {
+    return attemptedAt;
+  }
+
   public Instant getPublishedAt() {
     return publishedAt;
+  }
+
+  public void markAttempted(Instant at) {
+    this.attemptedAt = at;
   }
 
   public void markPublished(Instant at) {
