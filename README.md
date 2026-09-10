@@ -99,7 +99,7 @@ Output lands in `chaos/out/` (orders, kill timeline, metric snapshots, summary).
 
 ```bash
 make lint     # spotless (google-java-format)
-make test     # mvn verify: 77 unit tests + 7 integration tests
+make test     # mvn verify: 82 unit tests + 10 integration tests
 ```
 
 Unit tests (H2, no Docker): saga state machine transitions and compensation, deadline reaper
@@ -107,7 +107,8 @@ Unit tests (H2, no Docker): saga state machine transitions and compensation, dea
 timeline endpoint, outbox relay ordering and re-send behaviour, idempotent consumer, breaker and
 time limiter fallbacks, cache write-through after commit, atomic and concurrent reservations,
 retry / breaker / deferred queue, re-drive answers, deterministic processor, the replay cap that
-turns a record into a parked poison message.
+turns a record into a parked poison message, the request deduplication store, the relay counting a
+send that never confirmed.
 
 Integration tests (`e2e-tests`, Testcontainers Redpanda + Postgres + Redis, all three services
 booted in one JVM): an order flows to CONFIRMED end to end, out of stock and declined payment
@@ -115,13 +116,16 @@ paths with stock release, triple delivery of the same event reserves stock once,
 listener stopped mid-flight confirms after restart, an inventory service restarted with twelve
 orders in flight confirms all of them, and a record that can never be processed reaches the dead
 letter topic after the configured attempts without holding up the record behind it, is replayed
-once, and is parked on the second replay.
+once, and is parked on the second replay. Exactly once at the boundary has a class of its own: the
+same idempotency key twice and two calls racing on one key each place one order and return one body,
+and an outbox row put back into the crash window is sent again, ignored by the consumer, and leaves
+the stock ledger and the payment unchanged.
 
 ## API
 
 | Method | Path | Service | Notes |
 |---|---|---|---|
-| POST | `/orders` | order | body `{customerId, items:[{sku, quantity, unitPrice}]}`; 202 with the order, `Location` header |
+| POST | `/orders` | order | body `{customerId, items:[{sku, quantity, unitPrice}]}`; 202 with the order, `Location` header; an `Idempotency-Key` header makes the call repeatable, answered with `Idempotent-Replay` |
 | GET | `/orders/{id}` | order | `status` PENDING, RESERVED, CONFIRMED, CANCELLED; `reason` OUT_OF_STOCK, PAYMENT_DECLINED, RESERVATION_TIMEOUT or PAYMENT_TIMEOUT; `deadlineAt` for the current step, `redrives` |
 | GET | `/orders/{id}/timeline` | order | ordered list of `{type, from, to, reason, correlationId, at}`; ignored and late events appear with `to: null` |
 | GET | `/stock/{sku}` | order | live value from inventory, or `source: cache` / `unknown` under the breaker |
@@ -179,6 +183,23 @@ state machine and outbox as any inbound event:
 Timeout cancellations count as failures in the chaos summary, so a deadline that is too tight for
 the stack shows up as a red run rather than a quietly cancelled order.
 
+## Exactly once effects
+
+`POST /orders` takes an optional `Idempotency-Key` header. The first call runs the work and stores
+the answer it returned under that key in the same transaction as the order, its outbox row and its
+timeline entry, so the key and the effect can never disagree. A repeat is answered from the store,
+byte for byte, with `Idempotent-Replay: true`, and places no second order; the current state of the
+order is always at `GET /orders/{id}`. Two calls racing on one key both try to store the answer, the
+primary key lets one of them through, and the loser rolls back its own order and returns what the
+winner wrote.
+
+On the way out, the relay stamps `attemptedAt` on an outbox row before it sends and `publishedAt`
+only after the broker acknowledged it. A row that comes back attempted but unpublished is exactly
+the crash window between the two: it may or may not have reached the broker, so the relay sends it
+again and counts `ledgermesh.outbox.resends`. The redelivery is harmless because the consumer
+recognises the event id it already applied, which is why stock, payments and order state are the
+same after a repeat as before it.
+
 ## Dead letters and lag
 
 Every business topic has a `<topic>.dlq` shadow. A record whose handler keeps failing is retried in
@@ -202,6 +223,9 @@ Two gauges are recomputed from broker offsets every five seconds:
 
 ## Releases
 
+* **v4.0.0**: `Idempotency-Key` on `POST /orders` backed by a request deduplication store written
+  in the order's own transaction, and an outbox relay that stamps an attempt before the send so a
+  crash between the send and the ack shows up as a counted re-send rather than a second effect.
 * **v3.0.0**: a `<topic>.dlq` shadow for every topic with bounded in place retries,
   `POST /admin/dlq/{topic}/replay`, a poison message cap that parks a record once its replays are
   used up, and `ledgermesh.consumer.lag` / `ledgermesh.dlq.depth` gauges read from broker offsets.

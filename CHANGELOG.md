@@ -1,5 +1,16 @@
 # Changelog
 
+## v4.0.0
+
+* `POST /orders` accepts an `Idempotency-Key`. The first call stores the answer it returned in the
+  same transaction as the order, and a repeat is answered from that store with `Idempotent-Replay`
+  instead of placing a second order.
+* Two calls racing on one key place one order: the store's primary key lets one insert through and
+  the loser rolls its own order back and returns the winner's answer.
+* The outbox relay stamps an attempt before each send, so a row that comes back attempted but
+  unpublished is recognised as the crash window between the send and the ack, sent again and
+  counted in `ledgermesh.outbox.resends`.
+
 ## v3.0.0
 
 * Every business topic has a `<topic>.dlq` shadow. A record whose handler keeps failing is retried

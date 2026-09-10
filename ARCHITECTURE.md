@@ -55,6 +55,19 @@ Failure cases:
 
 Nothing is ever lost, at the cost of at-least-once delivery, which the next section absorbs.
 
+## Idempotency at the inbound edge
+
+A consumer that de-duplicates on event id protects everything downstream of the first commit, but
+nothing protects the caller who never saw the answer to `POST /orders` and pressed the button again.
+An `Idempotency-Key` header closes that gap: the key, the stored answer and the order are written in
+one transaction, so either the request happened and the key is on file, or neither is. The repeat is
+served from the store rather than from the current order, which is what makes the answer stable
+while the saga moves the order on underneath it.
+
+The race between two calls on one key is settled by the primary key of the store. Both run the work,
+both try to insert, one insert wins; the loser's transaction takes its order, outbox row and
+timeline entry down with it, and it returns the winner's answer.
+
 ## Idempotent consumers
 
 Each event carries a globally unique `eventId`. Consumers run their work through
@@ -186,8 +199,8 @@ Take any moment in an order's life and kill inventory or payment:
 3. After commit, before the offset commit: redelivered, recognized as processed, skipped.
 4. After commit, before the outbox relay published: the outbox row survives in Postgres and is
    published after restart.
-5. During publish: at worst the event is sent twice; the downstream consumer ignores the
-   duplicate by event id.
+5. During publish: the row is already stamped as attempted, so the relay sends it again after the
+   restart and counts a re-send; the downstream consumer ignores the duplicate by event id.
 6. Payment specifically, between recording and authorizing: the sweeper finds the open payment.
 
 Every step is either durable or replayable, and every replay is idempotent. The order service
@@ -206,7 +219,8 @@ Every service exposes `/actuator/health/{liveness,readiness}`, `/actuator/promet
 | `ledgermesh.saga.latency` | order | creation to terminal state, p50/p95/p99 |
 | `ledgermesh.saga.redrives` | order | payments asked for again by the reaper |
 | `ledgermesh.payments.redriven{state}` | payment | re-drives answered for open or settled payments |
-| `ledgermesh.outbox.backlog`, `.published`, `.send.failures` | all | relay health |
+| `ledgermesh.outbox.backlog`, `.published`, `.send.failures`, `.resends` | all | relay health |
+| `ledgermesh.requests.replayed` | order | answers served from the idempotency store |
 | `ledgermesh.consumer.duplicates` | all | redeliveries ignored |
 | `ledgermesh.consumer.delivery.failures{topic}` | all | failed deliveries, retried or dead lettered |
 | `ledgermesh.consumer.lag{group,topic}` | all | end offset minus committed offset |
