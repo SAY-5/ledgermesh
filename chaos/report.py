@@ -6,6 +6,7 @@ takes a snapshot of the victim right before each kill and the report adds those
 to the final scrape. Exit code is non zero when any order failed or is stuck.
 """
 import json
+import os
 import re
 import statistics
 import sys
@@ -13,9 +14,9 @@ import time
 import urllib.request
 
 SERVICES = {
-    "order-service": "http://localhost:8081",
-    "inventory-service": "http://localhost:8082",
-    "payment-service": "http://localhost:8083",
+    "order-service": "http://localhost:" + os.environ.get("LEDGERMESH_ORDER_PORT", "8081"),
+    "inventory-service": "http://localhost:" + os.environ.get("LEDGERMESH_INVENTORY_PORT", "8082"),
+    "payment-service": "http://localhost:" + os.environ.get("LEDGERMESH_PAYMENT_PORT", "8083"),
 }
 TERMINAL = {"CONFIRMED", "CANCELLED"}
 LINE = re.compile(r'^([a-zA-Z_:][\w:]*)(\{[^}]*\})?\s+([-+eE.\d]+)$')
@@ -61,15 +62,16 @@ def overview_lines():
     """Health, lag, dead letters, breakers and open sagas as the services report them now."""
     pages = {service: overview(service) for service in SERVICES}
     health = ", ".join(f"{s} {p.get('health', 'UNREACHABLE')}" for s, p in pages.items())
-    lag = {f"{s}/{k}": v for s, p in pages.items() for k, v in p.get("consumerLag", {}).items()}
-    depth = {f"{s}/{k}": v for s, p in pages.items() for k, v in p.get("deadLetterDepth", {}).items()}
+    lag = {k: v for p in pages.values() for k, v in p.get("consumerLag", {}).items()}
+    depth = {f"{s} {k}": v for s, p in pages.items() for k, v in p.get("deadLetterDepth", {}).items()}
     breakers = {f"{s}/{k}": v for s, p in pages.items() for k, v in p.get("breakers", {}).items()}
     sagas = next((p["sagas"] for p in pages.values() if p.get("sagas")), {})
     worst_lag = max(lag.items(), key=lambda kv: kv[1], default=("none", 0))
+    worst_depth = max(depth.items(), key=lambda kv: kv[1], default=("none", 0))
     return [
         f"  services             {health}",
-        f"  consumer lag         {sum(lag.values())} total, worst {worst_lag[1]} on {worst_lag[0]}",
-        f"  dead letter depth    {sum(depth.values())} waiting across {len(depth)} topics",
+        f"  consumer lag         worst {worst_lag[1]} on {worst_lag[0]}",
+        f"  dead letter depth    worst {worst_depth[1]} on {worst_depth[0]}",
         "  breaker states       " + ("; ".join(f"{k} {v}" for k, v in sorted(breakers.items()))
                                      if breakers else "none"),
         f"  in flight sagas      {sagas.get('inFlight', 0)}",

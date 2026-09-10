@@ -68,7 +68,7 @@ make chaos-tight  # the same run with six kills and a two second restart
 ```
 
 Measured output of the run recorded in this repository (macOS host, Docker via Colima, three
-kills, restart after 5 s):
+kills, restart after 5 s, other containers sharing the machine):
 
 ```
 LedgerMesh chaos summary
@@ -77,13 +77,19 @@ LedgerMesh chaos summary
   confirmed            1162
   cancelled (stock)    38
   failed / stuck       0
-  kills                3  (inventory-service @22s, payment-service @40s, inventory-service @56s)
-  saga latency         p50 19955 ms   p95 33136 ms   max 35397 ms
-  breaker transitions  order-service/inventory CLOSED->OPEN x2; order-service/inventory HALF_OPEN->CLOSED x1; order-service/inventory HALF_OPEN->OPEN x2; order-service/inventory OPEN->HALF_OPEN x4
-  retries              with retry 71 ok / 0 exhausted, without retry 1088 ok / 0 failed
+  kills                3  (inventory-service @16s, payment-service @37s, inventory-service @49s)
+  saga latency         p50 12825 ms   p95 36859 ms   max 39490 ms
+  breaker transitions  order-service/inventory CLOSED->OPEN x2; order-service/inventory HALF_OPEN->CLOSED x1; order-service/inventory HALF_OPEN->OPEN x3; order-service/inventory OPEN->HALF_OPEN x5
+  retries              with retry 59 ok / 0 exhausted, without retry 1100 ok / 0 failed
   deferred payments    0
-  duplicate events     1 ignored by idempotent consumers
-  stock probes         {'live': 58, 'cache': 40, 'unknown': 0, 'error': 0}
+  duplicate events     0 ignored by idempotent consumers
+  stock probes         {'live': 48, 'cache': 51, 'unknown': 0, 'error': 0}
+  services             order-service UP, inventory-service UP, payment-service UP
+  consumer lag         worst 0 on order-service|inventory.rejected
+  dead letter depth    worst 0 on order-service inventory.rejected
+  breaker states       inventory-service/redis CLOSED; order-service/inventory HALF_OPEN; payment-service/processor CLOSED
+  in flight sagas      0
+  stuck orders         0
 ```
 
 `failed / stuck` counts orders that did not reach a terminal state, orders cancelled for any
@@ -91,11 +97,13 @@ reason other than stock, and rejected submissions. `cancelled (stock)` are order
 `SKU-SCARCE`, which is seeded with 40 units so the out of stock branch is exercised on every run.
 Retries, deferred payments and breaker transitions come from the synthetic processor's
 deterministic transient faults and from the kills themselves. Counters are snapshotted right
-before each kill because a killed JVM loses its in-memory meters.
+before each kill because a killed JVM loses its in-memory meters. The last six lines are the
+`/ops/overview` of each service read after the backlog drained.
 
 Knobs: `CHAOS_PROFILE` (`steady` three kills restarting after 5 s, `tight` six kills restarting
 after 2 s), `CHAOS_DURATION`, `CHAOS_RATE`, `CHAOS_KILLS`, `CHAOS_RESTART_AFTER`,
-`CHAOS_KEEP_STACK=1`, `CHAOS_PYTHON`.
+`CHAOS_KEEP_STACK=1`, `CHAOS_PYTHON`, and `LEDGERMESH_ORDER_PORT` / `LEDGERMESH_INVENTORY_PORT` /
+`LEDGERMESH_PAYMENT_PORT` when 8081 to 8083 are taken on the host.
 Output lands in `chaos/out/` (orders, kill timeline, metric snapshots, summary).
 
 ## Tests

@@ -21,6 +21,11 @@ RESTART_AFTER="${CHAOS_RESTART_AFTER:-$profile_restart}"
 DRAIN_TIMEOUT="${CHAOS_DRAIN_TIMEOUT:-180}"
 DRAIN_CAP="${CHAOS_DRAIN_CAP:-600}"
 KEEP_STACK="${CHAOS_KEEP_STACK:-0}"
+ORDER_PORT="${LEDGERMESH_ORDER_PORT:-8081}"
+INVENTORY_PORT="${LEDGERMESH_INVENTORY_PORT:-8082}"
+PAYMENT_PORT="${LEDGERMESH_PAYMENT_PORT:-8083}"
+export LEDGERMESH_ORDER_PORT="$ORDER_PORT" LEDGERMESH_INVENTORY_PORT="$INVENTORY_PORT" \
+  LEDGERMESH_PAYMENT_PORT="$PAYMENT_PORT"
 PROJECT=ledgermesh
 COMPOSE="docker compose -p $PROJECT -f deploy/docker-compose.yml"
 OUT=chaos/out
@@ -39,12 +44,14 @@ wait_ready() {
 
 log "starting stack (compose project $PROJECT, profile $PROFILE, $KILLS kills, restart after ${RESTART_AFTER}s)"
 $COMPOSE up -d --build --wait
-for svc in order-service:8081 inventory-service:8082 payment-service:8083; do
+for svc in "order-service:$ORDER_PORT" "inventory-service:$INVENTORY_PORT" \
+           "payment-service:$PAYMENT_PORT"; do
   wait_ready "${svc%%:*}" "${svc##*:}"
 done
 log "stack ready"
 
-$PY chaos/loadgen.py --rate "$RATE" --duration "$DURATION" --out "$OUT/orders.json" &
+$PY chaos/loadgen.py --base "http://localhost:$ORDER_PORT" --rate "$RATE" \
+  --duration "$DURATION" --out "$OUT/orders.json" &
 LOADGEN=$!
 START=$SECONDS
 
@@ -65,8 +72,8 @@ for (( i=0; i<KILLS; i++ )); do
   log "restarting $container"
   docker start "$container" >/dev/null
   case $victim in
-    inventory-service) wait_ready "$victim" 8082 ;;
-    payment-service) wait_ready "$victim" 8083 ;;
+    inventory-service) wait_ready "$victim" "$INVENTORY_PORT" ;;
+    payment-service) wait_ready "$victim" "$PAYMENT_PORT" ;;
   esac
   log "$victim back at t+$(( SECONDS - START ))s"
 done
