@@ -166,13 +166,30 @@ public final class Stack {
   }
 
   static String createOrder(String customer, String sku, int quantity, BigDecimal unitPrice) {
-    String body =
-        """
+    return send("POST", ordersUrl(), orderBody(customer, sku, quantity, unitPrice))
+        .get("id")
+        .asText();
+  }
+
+  static JsonNode createOrder(
+      String idempotencyKey, String customer, String sku, int quantity, BigDecimal unitPrice) {
+    return send(
+        "POST",
+        ordersUrl(),
+        orderBody(customer, sku, quantity, unitPrice),
+        "Idempotency-Key",
+        idempotencyKey);
+  }
+
+  static String ordersUrl() {
+    return "http://localhost:" + orderPort + "/orders";
+  }
+
+  static String orderBody(String customer, String sku, int quantity, BigDecimal unitPrice) {
+    return """
         {"customerId":"%s","items":[{"sku":"%s","quantity":%d,"unitPrice":%s}]}
         """
-            .formatted(customer, sku, quantity, unitPrice.toPlainString());
-    JsonNode response = send("POST", "http://localhost:" + orderPort + "/orders", body);
-    return response.get("id").asText();
+        .formatted(customer, sku, quantity, unitPrice.toPlainString());
   }
 
   static JsonNode getOrder(String id) {
@@ -200,8 +217,11 @@ public final class Stack {
     return send("GET", "http://localhost:" + orderPort + "/stock/" + sku, null);
   }
 
-  static JsonNode send(String method, String url, String body) {
+  static JsonNode send(String method, String url, String body, String... headers) {
     HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(url));
+    if (headers.length > 0) {
+      request.headers(headers);
+    }
     if (body == null) {
       request.method(method, HttpRequest.BodyPublishers.noBody());
     } else {
