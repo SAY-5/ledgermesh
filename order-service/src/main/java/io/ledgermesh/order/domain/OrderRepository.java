@@ -10,6 +10,8 @@ public interface OrderRepository extends JpaRepository<Order, String> {
 
   List<Order> findByStatusIn(List<OrderStatus> statuses);
 
+  long countByStatusInAndDeadlineAtLessThanEqual(List<OrderStatus> statuses, Instant now);
+
   List<Order> findTop100ByStatusInAndDeadlineAtLessThanEqualOrderByDeadlineAtAsc(
       List<OrderStatus> statuses, Instant now);
 }
