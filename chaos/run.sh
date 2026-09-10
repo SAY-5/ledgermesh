@@ -4,10 +4,20 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+# Profiles set the kill schedule; every knob can still be overridden on its own.
+PROFILE="${CHAOS_PROFILE:-steady}"
+case "$PROFILE" in
+  steady) profile_kills=3; profile_restart=5 ;;
+  tight)  profile_kills=6; profile_restart=2 ;;
+  *) echo "unknown CHAOS_PROFILE $PROFILE (steady, tight)" >&2; exit 2 ;;
+esac
+
+PY="${CHAOS_PYTHON:-python3}"
 DURATION="${CHAOS_DURATION:-60}"
 RATE="${CHAOS_RATE:-20}"
-KILLS="${CHAOS_KILLS:-3}"
-RESTART_AFTER="${CHAOS_RESTART_AFTER:-5}"
+KILLS="${CHAOS_KILLS:-$profile_kills}"
+RESTART_AFTER="${CHAOS_RESTART_AFTER:-$profile_restart}"
 DRAIN_TIMEOUT="${CHAOS_DRAIN_TIMEOUT:-180}"
 DRAIN_CAP="${CHAOS_DRAIN_CAP:-600}"
 KEEP_STACK="${CHAOS_KEEP_STACK:-0}"
@@ -27,14 +37,14 @@ wait_ready() {
   done
 }
 
-log "starting stack (compose project $PROJECT)"
+log "starting stack (compose project $PROJECT, profile $PROFILE, $KILLS kills, restart after ${RESTART_AFTER}s)"
 $COMPOSE up -d --build --wait
 for svc in order-service:8081 inventory-service:8082 payment-service:8083; do
   wait_ready "${svc%%:*}" "${svc##*:}"
 done
 log "stack ready"
 
-python3 chaos/loadgen.py --rate "$RATE" --duration "$DURATION" --out "$OUT/orders.json" &
+$PY chaos/loadgen.py --rate "$RATE" --duration "$DURATION" --out "$OUT/orders.json" &
 LOADGEN=$!
 START=$SECONDS
 
@@ -47,10 +57,10 @@ for (( i=0; i<KILLS; i++ )); do
   while (( SECONDS - START < target )); do sleep 1; done
   victim=${victims[$(( RANDOM % ${#victims[@]} ))]}
   container="$PROJECT-$victim-1"
-  python3 chaos/report.py snapshot "$victim" "$OUT/snapshots.jsonl" || true
+  $PY chaos/report.py snapshot "$victim" "$OUT/snapshots.jsonl" || true
   log "killing $container at t+$(( SECONDS - START ))s"
   docker kill --signal=SIGKILL "$container" >/dev/null
-  printf '{"service":"%s","at":%s}\n' "$victim" "$(python3 -c 'import time;print(time.time())')" >> "$OUT/kills.jsonl"
+  printf '{"service":"%s","at":%s}\n' "$victim" "$($PY -c 'import time;print(time.time())')" >> "$OUT/kills.jsonl"
   sleep "$RESTART_AFTER"
   log "restarting $container"
   docker start "$container" >/dev/null
@@ -63,10 +73,10 @@ done
 
 wait $LOADGEN
 log "load finished, waiting for the saga backlog to drain"
-python3 chaos/report.py drain "$OUT/orders.json" "$DRAIN_TIMEOUT" "$DRAIN_CAP" || log "drain timed out"
+$PY chaos/report.py drain "$OUT/orders.json" "$DRAIN_TIMEOUT" "$DRAIN_CAP" || log "drain timed out"
 
 echo
-python3 chaos/report.py summary "$OUT/orders.json" "$OUT/snapshots.jsonl" "$OUT/kills.jsonl"
+$PY chaos/report.py summary "$OUT/orders.json" "$OUT/snapshots.jsonl" "$OUT/kills.jsonl"
 RESULT=$?
 echo
 

@@ -49,6 +49,34 @@ def snapshot(service, path):
         fh.write(json.dumps({"service": service, "at": time.time(), "counters": scrape(service)}) + "\n")
 
 
+def overview(service):
+    """The /ops/overview page of one service, or an empty dict when it cannot be reached."""
+    try:
+        return json.loads(fetch(f"{SERVICES[service]}/ops/overview"))
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def overview_lines():
+    """Health, lag, dead letters, breakers and open sagas as the services report them now."""
+    pages = {service: overview(service) for service in SERVICES}
+    health = ", ".join(f"{s} {p.get('health', 'UNREACHABLE')}" for s, p in pages.items())
+    lag = {f"{s}/{k}": v for s, p in pages.items() for k, v in p.get("consumerLag", {}).items()}
+    depth = {f"{s}/{k}": v for s, p in pages.items() for k, v in p.get("deadLetterDepth", {}).items()}
+    breakers = {f"{s}/{k}": v for s, p in pages.items() for k, v in p.get("breakers", {}).items()}
+    sagas = next((p["sagas"] for p in pages.values() if p.get("sagas")), {})
+    worst_lag = max(lag.items(), key=lambda kv: kv[1], default=("none", 0))
+    return [
+        f"  services             {health}",
+        f"  consumer lag         {sum(lag.values())} total, worst {worst_lag[1]} on {worst_lag[0]}",
+        f"  dead letter depth    {sum(depth.values())} waiting across {len(depth)} topics",
+        "  breaker states       " + ("; ".join(f"{k} {v}" for k, v in sorted(breakers.items()))
+                                     if breakers else "none"),
+        f"  in flight sagas      {sagas.get('inFlight', 0)}",
+        f"  stuck orders         {sagas.get('stuck', 0)}",
+    ]
+
+
 def order(order_id):
     return json.loads(fetch(f"{SERVICES['order-service']}/orders/{order_id}"))
 
@@ -168,6 +196,7 @@ def summary(orders_path, snapshots_path, kills_path):
         f"  duplicate events     {duplicates} ignored by idempotent consumers",
         f"  stock probes         {run['stockProbes']}",
     ]
+    lines += overview_lines()
     text = "\n".join(lines)
     print(text)
     with open("chaos/out/summary.txt", "w") as fh:

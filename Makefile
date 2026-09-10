@@ -1,7 +1,7 @@
 COMPOSE := docker compose -p ledgermesh -f deploy/docker-compose.yml
 MVN := mvn -B
 
-.PHONY: help build test lint format up down logs ps chaos demo clean
+.PHONY: help build test lint format up down logs ps chaos chaos-tight demo clean
 
 help:
 	@echo "build   compile and package all modules (no tests)"
@@ -11,6 +11,7 @@ help:
 	@echo "up      build images and start the stack"
 	@echo "down    stop the stack and drop volumes"
 	@echo "chaos   run the chaos test against the stack (make demo is an alias)"
+	@echo "chaos-tight  the same run with twice the kills and a two second restart"
 
 build:
 	$(MVN) -DskipTests package
@@ -38,6 +39,9 @@ ps:
 
 chaos:
 	bash chaos/run.sh
+
+chaos-tight:
+	CHAOS_PROFILE=tight bash chaos/run.sh
 
 demo: chaos
 
