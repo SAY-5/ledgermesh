@@ -214,7 +214,7 @@ def summary(orders_path, snapshots_path, kills_path):
     transitions = []
     retries = {"successful_with_retry": 0, "failed_with_retry": 0, "successful_without_retry": 0,
                "failed_without_retry": 0}
-    deferred = duplicates = releases = replayed = 0
+    deferred = duplicates = releases = release_noops = replayed = 0
     for service, counters in totals.items():
         for key, value in counters.items():
             name, _, labels = key.partition("{")
@@ -229,7 +229,10 @@ def summary(orders_path, snapshots_path, kills_path):
             elif name == "ledgermesh_consumer_duplicates_total":
                 duplicates += int(value)
             elif name == "ledgermesh_inventory_releases_total":
-                releases += int(value)
+                if label(labels, "result") in ("", "released"):
+                    releases += int(value)
+                else:
+                    release_noops += int(value)
             elif name == "ledgermesh_requests_replayed_total":
                 replayed += int(value)
 
@@ -263,7 +266,8 @@ def summary(orders_path, snapshots_path, kills_path):
         f"{retries['failed_without_retry']} failed",
         f"  deferred payments    {deferred}",
         f"  duplicate events     {duplicates} ignored by idempotent consumers",
-        f"  compensations        {releases} reservations released",
+        f"  compensations        {releases} reservations released, {release_noops} releases for orders "
+        f"that held nothing",
         f"  resubmits            {run.get('resubmits', 0)} retried submits over "
         f"{run.get('retriedOrders', 0)} orders, {run.get('replayedAnswers', 0)} answered from the "
         f"idempotency store ({replayed} replays counted by the service), "
