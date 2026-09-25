@@ -42,12 +42,18 @@ if [[ "$KILLS" == 0 ]]; then LABEL="${CHAOS_LABEL:-baseline}"; else LABEL="${CHA
 mkdir -p "$OUT"
 rm -f "$OUT"/orders.json "$OUT"/snapshots.jsonl "$OUT"/kills.jsonl "$OUT"/summary.txt
 
-declare -A PORT_OF=(
-  [order-service]="$ORDER_PORT" [inventory-service]="$INVENTORY_PORT" [payment-service]="$PAYMENT_PORT"
-)
+# Host port of a service; a case statement keeps this runnable on the bash 3.2 that macOS ships.
+port_of() {
+  case "$1" in
+    order-service) echo "$ORDER_PORT" ;;
+    inventory-service) echo "$INVENTORY_PORT" ;;
+    payment-service) echo "$PAYMENT_PORT" ;;
+    *) return 1 ;;
+  esac
+}
 read -r -a victims <<< "$VICTIM_SPEC"
 for v in "${victims[@]}"; do
-  [[ -n "${PORT_OF[$v]:-}" ]] || { echo "unknown victim $v in CHAOS_VICTIMS" >&2; exit 2; }
+  port_of "$v" >/dev/null || { echo "unknown victim $v in CHAOS_VICTIMS" >&2; exit 2; }
 done
 RANDOM=$SEED
 
@@ -76,8 +82,8 @@ wait_ready() {
 
 log "starting stack (compose project $PROJECT, profile $PROFILE, $KILLS kills, restart after ${RESTART_AFTER}s, seed $SEED, victims: ${victims[*]})"
 $COMPOSE up -d --build --wait
-for svc in "${!PORT_OF[@]}"; do
-  wait_ready "$svc" "${PORT_OF[$svc]}"
+for svc in order-service inventory-service payment-service; do
+  wait_ready "$svc" "$(port_of "$svc")"
 done
 log "stack ready"
 
@@ -101,7 +107,7 @@ for (( i=0; i<KILLS; i++ )); do
   sleep "$RESTART_AFTER"
   log "restarting $container"
   docker start "$container" >/dev/null
-  wait_ready "$victim" "${PORT_OF[$victim]}"
+  wait_ready "$victim" "$(port_of "$victim")"
   log "$victim back at t+$(( SECONDS - START ))s"
 done
 
