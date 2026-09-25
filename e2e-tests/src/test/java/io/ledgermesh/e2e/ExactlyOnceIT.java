@@ -68,6 +68,24 @@ class ExactlyOnceIT {
   }
 
   @Test
+  void aKeyRetriedAcrossAnOrderServiceRestartPlacesOneOrder() {
+    Stack.putStock("E2E-KEY-RESTART", 40);
+    String key = UUID.randomUUID().toString();
+    JsonNode first = Stack.createOrder(key, "cust-key-restart", "E2E-KEY-RESTART", 2, PRICE);
+
+    // the client never saw the answer and the service went away in between: the store is in
+    // Postgres, so the restarted service answers the same key with the same body
+    Stack.order.close();
+    Stack.order = Stack.bootOrder();
+    JsonNode second = Stack.createOrder(key, "cust-key-restart", "E2E-KEY-RESTART", 2, PRICE);
+
+    assertThat(second).isEqualTo(first);
+    String id = first.get("id").asText();
+    await().atMost(TIMEOUT).until(() -> Stack.orderStatus(id).equals("CONFIRMED"));
+    assertThat(Stack.stock("E2E-KEY-RESTART")).isEqualTo(38);
+  }
+
+  @Test
   void anOutboxSendThatNeverConfirmedIsRepeatedAndTheConsumerIgnoresIt() {
     Stack.putStock("E2E-CRASH", 30);
     MeterRegistry orderMeters = Stack.order.getBean(MeterRegistry.class);
