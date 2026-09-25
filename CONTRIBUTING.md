@@ -32,6 +32,13 @@ through failsafe (`*IT` classes).
 * Keep the chaos summary honest: a change that turns a killed service into a failed order is a
   regression even if the tests pass.
 
+## Versioning
+
+Each numbered release is a demo milestone, not a semver contract: v2.0.0 to v5.0.0 were additive
+(deadlines, dead letters, idempotency keys, the ops overview) and would have been minor releases
+under semantic versioning. A release bumps the root `pom.xml` version, adds a dated entry to
+`CHANGELOG.md` and is tagged `vN.0.0`; the date in the changelog is the commit date of the tag.
+
 ## Adding a service
 
 1. Create a module with the `common` dependency and scan `io.ledgermesh.common`.
