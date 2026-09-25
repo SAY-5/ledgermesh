@@ -3,12 +3,17 @@
 
 Counters live in the JVM and reset when a container is killed, so the killer
 takes a snapshot of the victim right before each kill and the report adds those
-to the final scrape. Exit code is non zero when any order failed or is stuck.
+to the final scrape. The summary opens with the provenance of the run (commit,
+time, host, Docker, profile and every knob in effect) so a recorded summary can
+be re-derived. Exit code is non zero when any order failed or is stuck, or when
+CHAOS_MAX_P95 is set and the p95 saga latency exceeds it.
 """
 import json
 import os
+import platform
 import re
 import statistics
+import subprocess
 import sys
 import time
 import urllib.request
@@ -20,6 +25,9 @@ SERVICES = {
 }
 TERMINAL = {"CONFIRMED", "CANCELLED"}
 LINE = re.compile(r'^([a-zA-Z_:][\w:]*)(\{[^}]*\})?\s+([-+eE.\d]+)$')
+KNOBS = ["CHAOS_PROFILE", "CHAOS_DURATION", "CHAOS_RATE", "CHAOS_KILLS", "CHAOS_RESTART_AFTER",
+         "CHAOS_VICTIMS", "CHAOS_SEED", "CHAOS_DRAIN_TIMEOUT", "CHAOS_DRAIN_CAP", "CHAOS_MAX_P95"]
+SUMMARY_PATH = os.environ.get("CHAOS_SUMMARY", "chaos/out/summary.txt")
 
 
 def fetch(url, timeout=3.0):
@@ -40,7 +48,8 @@ def scrape(service):
         name, labels, value = m.group(1), m.group(2) or "", float(m.group(3))
         if name in ("ledgermesh_breaker_transitions_total", "resilience4j_retry_calls_total",
                     "ledgermesh_payments_deferred_total", "ledgermesh_consumer_duplicates_total",
-                    "ledgermesh_outbox_published_total", "ledgermesh_inventory_releases_total"):
+                    "ledgermesh_outbox_published_total", "ledgermesh_inventory_releases_total",
+                    "ledgermesh_requests_replayed_total"):
             counters[name + labels] = value
     return counters
 
@@ -59,23 +68,68 @@ def overview(service):
 
 
 def overview_lines():
-    """Health, lag, dead letters, breakers and open sagas as the services report them now."""
+    """Health, lag, dead letters, parked records, breakers and open sagas as reported now."""
     pages = {service: overview(service) for service in SERVICES}
     health = ", ".join(f"{s} {p.get('health', 'UNREACHABLE')}" for s, p in pages.items())
     lag = {k: v for p in pages.values() for k, v in p.get("consumerLag", {}).items()}
     depth = {f"{s} {k}": v for s, p in pages.items() for k, v in p.get("deadLetterDepth", {}).items()}
+    parked = {f"{s} {k}": v for s, p in pages.items() for k, v in p.get("parkedDepth", {}).items()}
     breakers = {f"{s}/{k}": v for s, p in pages.items() for k, v in p.get("breakers", {}).items()}
     sagas = next((p["sagas"] for p in pages.values() if p.get("sagas")), {})
     worst_lag = max(lag.items(), key=lambda kv: kv[1], default=("none", 0))
     worst_depth = max(depth.items(), key=lambda kv: kv[1], default=("none", 0))
+    worst_parked = max(parked.items(), key=lambda kv: kv[1], default=("none", 0))
     return [
         f"  services             {health}",
         f"  consumer lag         worst {worst_lag[1]} on {worst_lag[0]}",
         f"  dead letter depth    worst {worst_depth[1]} on {worst_depth[0]}",
+        f"  parked records       worst {worst_parked[1]} on {worst_parked[0]}",
         "  breaker states       " + ("; ".join(f"{k} {v}" for k, v in sorted(breakers.items()))
                                      if breakers else "none"),
         f"  in flight sagas      {sagas.get('inFlight', 0)}",
         f"  stuck orders         {sagas.get('stuck', 0)}",
+    ]
+
+
+def sh(*cmd):
+    try:
+        done = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        return done.stdout.strip() if done.returncode == 0 else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def host_memory_gib():
+    if platform.system() == "Darwin":
+        raw = sh("sysctl", "-n", "hw.memsize")
+        return int(raw) / 2 ** 30 if raw.isdigit() else None
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) / 2 ** 20
+    except OSError:
+        return None
+    return None
+
+
+def provenance_lines():
+    """Where, when and with what this summary was produced, read from the environment."""
+    commit = sh("git", "rev-parse", "--short", "HEAD") or "unknown"
+    dirty = " with uncommitted changes" if sh("git", "status", "--porcelain", "--untracked-files=no") else ""
+    when = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    mem = host_memory_gib()
+    docker = sh("docker", "version", "--format", "{{.Server.Version}}") or "unknown"
+    context = sh("docker", "context", "show")
+    host = (f"{platform.system()} {platform.release()} {platform.machine()}, "
+            f"{os.cpu_count()} cpu, {mem:.1f} GiB" if mem else
+            f"{platform.system()} {platform.release()} {platform.machine()}, {os.cpu_count()} cpu")
+    knobs = " ".join(f"{k}={os.environ[k]}" for k in KNOBS if os.environ.get(k))
+    return [
+        f"  recorded             {when} at commit {commit}{dirty}",
+        f"  host                 {host}; Docker server {docker}" + (f" ({context})" if context else "")
+        + f"; Python {platform.python_version()}",
+        f"  knobs                {knobs or 'defaults'}",
     ]
 
 
@@ -130,7 +184,9 @@ def summary(orders_path, snapshots_path, kills_path):
     cancelled_stock = sum(1 for s, r in states.values() if s == "CANCELLED" and r == "OUT_OF_STOCK")
     cancelled_other = sum(1 for s, r in states.values() if s == "CANCELLED" and r != "OUT_OF_STOCK")
     stuck = sum(1 for s, _ in states.values() if s not in TERMINAL)
-    failed = stuck + cancelled_other + len(run["submitErrors"])
+    # one accepted submit per key: a retried key that placed two orders would show up here
+    duplicate_orders = len(submitted) - len({o["id"] for o in submitted})
+    failed = stuck + cancelled_other + len(run["submitErrors"]) + duplicate_orders
 
     totals = {}
     for service in SERVICES:
@@ -158,7 +214,7 @@ def summary(orders_path, snapshots_path, kills_path):
     transitions = []
     retries = {"successful_with_retry": 0, "failed_with_retry": 0, "successful_without_retry": 0,
                "failed_without_retry": 0}
-    deferred = duplicates = releases = 0
+    deferred = duplicates = releases = replayed = 0
     for service, counters in totals.items():
         for key, value in counters.items():
             name, _, labels = key.partition("{")
@@ -174,36 +230,53 @@ def summary(orders_path, snapshots_path, kills_path):
                 duplicates += int(value)
             elif name == "ledgermesh_inventory_releases_total":
                 releases += int(value)
+            elif name == "ledgermesh_requests_replayed_total":
+                replayed += int(value)
 
     p50 = statistics.median(latencies) if latencies else 0
     p95 = percentile(latencies, 95)
     pmax = max(latencies) if latencies else 0
     start = run["startedAt"]
     timeline = ", ".join(f"{k['service']} @{k['at'] - start:.0f}s" for k in kills)
+    ceiling = os.environ.get("CHAOS_MAX_P95")
+    breached = bool(ceiling) and p95 > float(ceiling)
 
-    lines = [
-        "LedgerMesh chaos summary",
-        f"  load                 {run['duration']:.0f}s at {run['rate']:.0f} orders/s",
+    lines = ["LedgerMesh chaos summary"]
+    lines += provenance_lines()
+    lines += [
+        f"  load                 {run['duration']:.0f}s at {run['rate']:.0f} orders/s"
+        + (f", seed {run['seed']}" if "seed" in run else ""),
         f"  orders submitted     {len(submitted)}",
         f"  confirmed            {confirmed}",
         f"  cancelled (stock)    {cancelled_stock}",
         f"  failed / stuck       {failed}",
-        f"  kills                {len(kills)}  ({timeline})",
+        f"  kills                {len(kills)}  ({timeline})" if kills else "  kills                0  (baseline, no kills)",
         f"  saga latency         p50 {p50:.0f} ms   p95 {p95:.0f} ms   max {pmax:.0f} ms",
+    ]
+    if ceiling:
+        lines.append(f"  p95 ceiling          {float(ceiling):.0f} ms (CHAOS_MAX_P95) "
+                     + ("BREACHED" if breached else "held"))
+    lines += [
         "  breaker transitions  " + ("; ".join(sorted(transitions)) if transitions else "none"),
         f"  retries              with retry {retries['successful_with_retry']} ok / "
         f"{retries['failed_with_retry']} exhausted, without retry {retries['successful_without_retry']} ok / "
         f"{retries['failed_without_retry']} failed",
         f"  deferred payments    {deferred}",
         f"  duplicate events     {duplicates} ignored by idempotent consumers",
+        f"  compensations        {releases} reservations released",
+        f"  resubmits            {run.get('resubmits', 0)} retried submits over "
+        f"{run.get('retriedOrders', 0)} orders, {run.get('replayedAnswers', 0)} answered from the "
+        f"idempotency store ({replayed} replays counted by the service), "
+        f"{len(run['submitErrors'])} gave up, {duplicate_orders} duplicate orders",
         f"  stock probes         {run['stockProbes']}",
     ]
     lines += overview_lines()
     text = "\n".join(lines)
     print(text)
-    with open("chaos/out/summary.txt", "w") as fh:
+    os.makedirs(os.path.dirname(SUMMARY_PATH) or ".", exist_ok=True)
+    with open(SUMMARY_PATH, "w") as fh:
         fh.write(text + "\n")
-    return failed
+    return failed + (1 if breached else 0)
 
 
 def percentile(values, p):
