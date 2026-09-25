@@ -111,7 +111,7 @@ Output lands in `chaos/out/` (orders, kill timeline, metric snapshots, summary).
 
 ```bash
 make lint     # spotless (google-java-format)
-make test     # mvn verify: 83 unit tests + 12 integration tests
+make test     # mvn verify: 89 unit tests + 14 integration tests
 ```
 
 Unit tests (H2, no Docker): saga state machine transitions and compensation, deadline reaper
@@ -119,8 +119,12 @@ Unit tests (H2, no Docker): saga state machine transitions and compensation, dea
 timeline endpoint, outbox relay ordering and re-send behaviour, idempotent consumer, breaker and
 time limiter fallbacks, cache write-through after commit, atomic and concurrent reservations,
 retry / breaker / deferred queue, re-drive answers, deterministic processor, the replay cap that
-turns a record into a parked poison message, the request deduplication store, the relay counting a
-send that never confirmed, the open and overdue saga counts behind the ops overview.
+turns a record into a parked poison message, the replayer committing only the offsets it handled
+and waiting for its group assignment before it treats silence as an empty topic, the request
+deduplication store, the relay counting a send that never confirmed, the open and overdue saga
+counts behind the ops overview, and the reservation ledger (a release credits what the order held,
+a release before the reservation is a no-op that blocks the late reservation, a repeated
+reservation takes stock once).
 
 Integration tests (`e2e-tests`, Testcontainers Redpanda + Postgres + Redis, all three services
 booted in one JVM): an order flows to CONFIRMED end to end, out of stock and declined payment
@@ -128,10 +132,13 @@ paths with stock release, triple delivery of the same event reserves stock once,
 listener stopped mid-flight confirms after restart, an inventory service restarted with twelve
 orders in flight confirms all of them, and a record that can never be processed reaches the dead
 letter topic after the configured attempts without holding up the record behind it, is replayed
-once, and is parked on the second replay. Exactly once at the boundary has a class of its own: the
-same idempotency key twice and two calls racing on one key each place one order and return one body,
-and an outbox row put back into the crash window is sent again, ignored by the consumer, and leaves
-the stock ledger and the payment unchanged. The ops overview is checked against a listener that is
+once, is parked on the second replay and is then listed by `GET /admin/dlq/parked` with its replay
+count and original coordinates. A release that reaches inventory before the reservation it undoes
+leaves stock untouched and the late reservation is rejected. Exactly once at the boundary has a class of its own: the
+same idempotency key twice, two calls racing on one key, and the same key retried across a restart
+of the order service each place one order and return one body, and an outbox row put back into the
+crash window is sent again, ignored by the consumer, and leaves the stock ledger and the payment
+unchanged. The ops overview is checked against a listener that is
 stopped and started again: lag rises and falls, the order shows up as in flight and then does not,
 and the services that do not own the saga report the rest of the page without it.
 
