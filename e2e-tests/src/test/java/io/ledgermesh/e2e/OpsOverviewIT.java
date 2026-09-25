@@ -30,21 +30,25 @@ class OpsOverviewIT {
             .getListenerContainer("inventory-orders");
     long inFlightBefore = inFlight();
 
+    String id;
     listener.stop();
-    String id = Stack.createOrder("cust-ops", "E2E-OPS", 1, new BigDecimal("4.00"));
-    await().atMost(TIMEOUT).until(() -> inFlight() == inFlightBefore + 1);
+    try {
+      id = Stack.createOrder("cust-ops", "E2E-OPS", 1, new BigDecimal("4.00"));
+      await().atMost(TIMEOUT).until(() -> inFlight() == inFlightBefore + 1);
 
-    JsonNode open = overview(Stack.orderPort);
-    assertThat(open.get("service").asText()).isNotBlank();
-    assertThat(open.get("health").asText()).isEqualTo("UP");
-    assertThat(open.at("/breakers/inventory").asText()).isEqualTo("CLOSED");
-    assertThat(open.at("/sagas/stuck").asLong()).isZero();
-    assertThat(open.at("/sagas/byState/PENDING").asLong()).isPositive();
-    assertThat(open.get("deadLetterDepth").has(Topics.ORDER_CREATED)).isTrue();
-    assertThat(open.get("consumerLag").size()).isPositive();
-    await().atMost(TIMEOUT).until(() -> lag("inventory-service|" + Topics.ORDER_CREATED) >= 1);
-
-    listener.start();
+      JsonNode open = overview(Stack.orderPort);
+      assertThat(open.get("service").asText()).isNotBlank();
+      assertThat(open.get("health").asText()).isEqualTo("UP");
+      assertThat(open.at("/breakers/inventory").asText()).isEqualTo("CLOSED");
+      assertThat(open.at("/sagas/stuck").asLong()).isZero();
+      assertThat(open.at("/sagas/byState/PENDING").asLong()).isPositive();
+      assertThat(open.get("deadLetterDepth").has(Topics.ORDER_CREATED)).isTrue();
+      assertThat(open.get("consumerLag").size()).isPositive();
+      await().atMost(TIMEOUT).until(() -> lag("inventory-service|" + Topics.ORDER_CREATED) >= 1);
+    } finally {
+      // the listener belongs to the shared stack: a failed assertion must not leave it stopped
+      listener.start();
+    }
     await().atMost(TIMEOUT).until(() -> Stack.orderStatus(id).equals("CONFIRMED"));
     await().atMost(TIMEOUT).until(() -> inFlight() == inFlightBefore);
     await().atMost(TIMEOUT).until(() -> lag("inventory-service|" + Topics.ORDER_CREATED) == 0);
