@@ -78,7 +78,6 @@ export function SagaTrace() {
       { name: "inventory-service", rows: cluster.inventory.outbox.rows },
       { name: "payment-service", rows: cluster.payment.outbox.rows },
     ],
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [cluster, runner.frame],
   );
 

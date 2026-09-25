@@ -13,7 +13,6 @@ export class StockCache {
   private entries = new Map<string, Entry>();
   hits = 0;
   misses = 0;
-  writes = 0;
 
   constructor(
     private readonly ttlMs: number,
@@ -34,7 +33,6 @@ export class StockCache {
   /** Write-through, called after the owning transaction committed. */
   write(sku: string, available: number, now: number, orderId?: string, silent = false): void {
     this.entries.set("stock:" + sku, { value: available, expiresAt: now + this.ttlMs });
-    this.writes++;
     if (silent) return;
     this.trace?.({
       t: now,
@@ -43,11 +41,6 @@ export class StockCache {
       text: `SET stock:${sku} ${available} EX ${Math.round(this.ttlMs / 1000)} (write-through after commit)`,
       orderId,
     });
-  }
-
-  ttlRemaining(sku: string, now: number): number {
-    const entry = this.entries.get("stock:" + sku);
-    return entry ? Math.max(0, entry.expiresAt - now) : 0;
   }
 
   snapshot(now: number): { sku: string; value: number; ttlMs: number }[] {

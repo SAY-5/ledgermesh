@@ -117,7 +117,6 @@ export function ChaosRun() {
       },
       flow: phase === "running" ? 1 : phase === "draining" ? 0.6 : 0.34,
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cluster, runner.frame, phase]);
 
   const kill = (name: ServiceName) => {
@@ -338,7 +337,6 @@ function Sparkline({ cluster, end, frame }: { cluster: Cluster; end: number; fra
   const y = (ms: number) => h - pad - (ms / maxMs) * (h - 2 * pad);
   const dots = useMemo(
     () => points.slice(-1500).map((p) => `${x(p.at).toFixed(1)},${y(p.ms).toFixed(1)}`),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [points.length, end, frame],
   );
   return (

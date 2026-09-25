@@ -59,7 +59,6 @@ export class OutboxRelay {
   /** rows sent whose acknowledgement has not been observed yet; in memory, lost on a kill */
   private awaitingAck: OutboxRow[] = [];
   private lastRun = -Infinity;
-  published = 0;
 
   constructor(
     private readonly service: ServiceName,
@@ -72,7 +71,6 @@ export class OutboxRelay {
   tick(now: number): number {
     for (const row of this.awaitingAck) {
       row.publishedAt = now;
-      this.published++;
     }
     this.awaitingAck = [];
     if (now - this.lastRun < this.pollMs) return 0;
