@@ -37,8 +37,10 @@ export function Hero() {
           <motion.p className="hero-lede" {...rise(0.18)}>
             A transactional outbox makes every event durable before it is sent, idempotent consumers
             make every redelivery harmless, and a deferred queue makes a lost payment attempt
-            resumable. This page runs a faithful TypeScript port of the services in your browser so
-            you can pull the plug yourself.
+            resumable. This page runs a TypeScript simulation of those v1 mechanisms in the browser,
+            with the constants generated from the services' configuration, so a service can be
+            killed from here. Saga deadlines, dead letters, idempotency keys and the ops overview
+            exist only in the services.
           </motion.p>
           <motion.div className="hero-actions" {...rise(0.26)}>
             <a className="btn btn-copper" href="#chaos">
