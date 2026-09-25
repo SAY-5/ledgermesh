@@ -21,18 +21,56 @@ RESTART_AFTER="${CHAOS_RESTART_AFTER:-$profile_restart}"
 DRAIN_TIMEOUT="${CHAOS_DRAIN_TIMEOUT:-180}"
 DRAIN_CAP="${CHAOS_DRAIN_CAP:-600}"
 KEEP_STACK="${CHAOS_KEEP_STACK:-0}"
+# The seed drives the kill schedule (moments and victims) and the load mix, so a run can be
+# repeated. Without CHAOS_SEED a fresh one is drawn and printed in the summary header.
+SEED="${CHAOS_SEED:-$(( $(date +%s) % 100000 ))}"
+VICTIM_SPEC="${CHAOS_VICTIMS:-inventory-service payment-service order-service}"
+RECORD="${CHAOS_RECORD:-0}"
 ORDER_PORT="${LEDGERMESH_ORDER_PORT:-8081}"
 INVENTORY_PORT="${LEDGERMESH_INVENTORY_PORT:-8082}"
 PAYMENT_PORT="${LEDGERMESH_PAYMENT_PORT:-8083}"
 export LEDGERMESH_ORDER_PORT="$ORDER_PORT" LEDGERMESH_INVENTORY_PORT="$INVENTORY_PORT" \
   LEDGERMESH_PAYMENT_PORT="$PAYMENT_PORT"
+# report.py prints every knob in effect in the summary header
+export CHAOS_PROFILE="$PROFILE" CHAOS_DURATION="$DURATION" CHAOS_RATE="$RATE" CHAOS_KILLS="$KILLS" \
+  CHAOS_RESTART_AFTER="$RESTART_AFTER" CHAOS_VICTIMS="$VICTIM_SPEC" CHAOS_SEED="$SEED" \
+  CHAOS_DRAIN_TIMEOUT="$DRAIN_TIMEOUT" CHAOS_DRAIN_CAP="$DRAIN_CAP"
 PROJECT=ledgermesh
 COMPOSE="docker compose -p $PROJECT -f deploy/docker-compose.yml"
 OUT=chaos/out
+if [[ "$KILLS" == 0 ]]; then LABEL="${CHAOS_LABEL:-baseline}"; else LABEL="${CHAOS_LABEL:-$PROFILE}"; fi
 mkdir -p "$OUT"
 rm -f "$OUT"/orders.json "$OUT"/snapshots.jsonl "$OUT"/kills.jsonl "$OUT"/summary.txt
 
+# Host port of a service; a case statement keeps this runnable on the bash 3.2 that macOS ships.
+port_of() {
+  case "$1" in
+    order-service) echo "$ORDER_PORT" ;;
+    inventory-service) echo "$INVENTORY_PORT" ;;
+    payment-service) echo "$PAYMENT_PORT" ;;
+    *) return 1 ;;
+  esac
+}
+read -r -a victims <<< "$VICTIM_SPEC"
+for v in "${victims[@]}"; do
+  port_of "$v" >/dev/null || { echo "unknown victim $v in CHAOS_VICTIMS" >&2; exit 2; }
+done
+RANDOM=$SEED
+
 log() { printf '%s chaos: %s\n' "$(date +%H:%M:%S)" "$*"; }
+
+LOADGEN=""
+cleanup() {
+  local rc=$?
+  if [[ -n "$LOADGEN" ]] && kill -0 "$LOADGEN" 2>/dev/null; then kill "$LOADGEN" 2>/dev/null || true; fi
+  if [[ "$KEEP_STACK" != "1" ]]; then
+    log "stopping stack"
+    $COMPOSE down -v --remove-orphans >/dev/null 2>&1 || true
+  fi
+  exit "$rc"
+}
+# Teardown runs on every exit path, including a failed summary or a readiness timeout.
+trap cleanup EXIT
 
 wait_ready() {
   local name=$1 port=$2 deadline=$((SECONDS + 120))
@@ -42,21 +80,19 @@ wait_ready() {
   done
 }
 
-log "starting stack (compose project $PROJECT, profile $PROFILE, $KILLS kills, restart after ${RESTART_AFTER}s)"
+log "starting stack (compose project $PROJECT, profile $PROFILE, $KILLS kills, restart after ${RESTART_AFTER}s, seed $SEED, victims: ${victims[*]})"
 $COMPOSE up -d --build --wait
-for svc in "order-service:$ORDER_PORT" "inventory-service:$INVENTORY_PORT" \
-           "payment-service:$PAYMENT_PORT"; do
-  wait_ready "${svc%%:*}" "${svc##*:}"
+for svc in order-service inventory-service payment-service; do
+  wait_ready "$svc" "$(port_of "$svc")"
 done
 log "stack ready"
 
 $PY chaos/loadgen.py --base "http://localhost:$ORDER_PORT" --rate "$RATE" \
-  --duration "$DURATION" --out "$OUT/orders.json" &
+  --duration "$DURATION" --seed "$SEED" --out "$OUT/orders.json" &
 LOADGEN=$!
 START=$SECONDS
 
-# Kill schedule: spread the kills across the load window with random jitter.
-victims=(inventory-service payment-service)
+# Kill schedule: spread the kills across the load window with seeded jitter.
 for (( i=0; i<KILLS; i++ )); do
   slot=$(( DURATION / (KILLS + 1) ))
   target=$(( slot * (i + 1) + RANDOM % (slot / 2 + 1) - slot / 4 ))
@@ -71,24 +107,29 @@ for (( i=0; i<KILLS; i++ )); do
   sleep "$RESTART_AFTER"
   log "restarting $container"
   docker start "$container" >/dev/null
-  case $victim in
-    inventory-service) wait_ready "$victim" "$INVENTORY_PORT" ;;
-    payment-service) wait_ready "$victim" "$PAYMENT_PORT" ;;
-  esac
+  wait_ready "$victim" "$(port_of "$victim")"
   log "$victim back at t+$(( SECONDS - START ))s"
 done
 
 wait $LOADGEN
+LOADGEN=""
 log "load finished, waiting for the saga backlog to drain"
 $PY chaos/report.py drain "$OUT/orders.json" "$DRAIN_TIMEOUT" "$DRAIN_CAP" || log "drain timed out"
 
 echo
-$PY chaos/report.py summary "$OUT/orders.json" "$OUT/snapshots.jsonl" "$OUT/kills.jsonl"
-RESULT=$?
+if $PY chaos/report.py summary "$OUT/orders.json" "$OUT/snapshots.jsonl" "$OUT/kills.jsonl"; then
+  RESULT=0
+else
+  RESULT=$?
+fi
 echo
 
-if [[ "$KEEP_STACK" != "1" ]]; then
-  log "stopping stack"
-  $COMPOSE down -v --remove-orphans >/dev/null 2>&1 || true
+# CHAOS_RECORD=1 keeps this run's summary and kill timeline under version control.
+if [[ "$RECORD" == "1" ]]; then
+  dest="chaos/evidence/$LABEL"
+  mkdir -p "$dest"
+  cp "$OUT/summary.txt" "$dest/summary.txt"
+  if [[ -f "$OUT/kills.jsonl" ]]; then cp "$OUT/kills.jsonl" "$dest/kills.jsonl"; else rm -f "$dest/kills.jsonl"; fi
+  log "recorded $dest/summary.txt"
 fi
 exit $RESULT

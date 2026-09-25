@@ -191,7 +191,7 @@ export function IdempotencyCache() {
               <button type="button" className="btn" onClick={() => brk.reset()}>
                 Reset
               </button>
-              <span className="mono panel-clock">probe GET /stock/{SKU} every 500 ms</span>
+              <span className="mono panel-clock">probe GET /stock/{SKU} every 500 ms, newest first</span>
             </div>
 
             <ol className="breaker-diagram" aria-label="Circuit breaker state">
@@ -209,8 +209,8 @@ export function IdempotencyCache() {
               ))}
             </ol>
 
-            <div className="probe-strip" aria-label="Recent stock probes">
-              {probes.current.map((p) => (
+            <div className="probe-strip" aria-label="Recent stock probes, newest first">
+              {[...probes.current].reverse().map((p) => (
                 <span
                   key={p.at}
                   className={`probe src-${p.view.source}`}

@@ -75,9 +75,13 @@ public class InventoryEventListener {
           CONSUMER,
           event.eventId(),
           () -> {
-            reservations.release(event.lines());
-            meters.counter("ledgermesh.inventory.releases").increment();
-            log.info("released reservation for order {} ({})", event.orderId(), event.reason());
+            int released = reservations.release(event.orderId(), event.lines());
+            meters
+                .counter(
+                    "ledgermesh.inventory.releases", "result", released > 0 ? "released" : "noop")
+                .increment();
+            log.info(
+                "released {} unit(s) for order {} ({})", released, event.orderId(), event.reason());
           });
     } finally {
       CorrelationId.clear();
@@ -85,7 +89,7 @@ public class InventoryEventListener {
   }
 
   private void reserve(OrderCreated event, String correlationId) {
-    Outcome outcome = reservations.reserve(event.lines());
+    Outcome outcome = reservations.reserve(event.orderId(), event.lines());
     if (outcome instanceof Rejected rejected) {
       outbox.append(
           new InventoryRejected(

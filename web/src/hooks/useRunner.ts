@@ -23,8 +23,6 @@ export interface Runner {
   pause(): void;
   setSpeed(speed: number): void;
   reset(): void;
-  /** run a bounded amount of virtual time immediately */
-  advance(ms: number): void;
 }
 
 /**
@@ -83,17 +81,5 @@ export function useRunner(factory: () => Cluster, options: RunnerOptions = {}): 
     setCluster(factory());
     setFrame((f) => f + 1);
   }, [factory]);
-  const advance = useCallback(
-    (ms: number) => {
-      const until = cluster.now + ms;
-      while (cluster.now < until) {
-        optionsRef.current.onStep?.(cluster);
-        cluster.step();
-      }
-      setFrame((f) => f + 1);
-    },
-    [cluster],
-  );
-
-  return { cluster, running, speed, frame, start, pause, setSpeed, reset, advance };
+  return { cluster, running, speed, frame, start, pause, setSpeed, reset };
 }

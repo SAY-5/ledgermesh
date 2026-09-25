@@ -1,4 +1,5 @@
 import type { BusRecord } from "./broker.ts";
+import { CONFIG } from "./config.generated.ts";
 import { Topics, type OrderLine, type OrderCancelled, type OrderCreated } from "./events.ts";
 import type { Prng } from "./prng.ts";
 import { CircuitBreaker, type BreakerConfig } from "./resilience.ts";
@@ -41,15 +42,9 @@ interface StockCall {
   onDone: (view: StockView) => void;
 }
 
-export const INVENTORY_BREAKER: BreakerConfig = {
-  slidingWindowSize: 10,
-  minimumNumberOfCalls: 4,
-  failureRateThreshold: 50,
-  waitDurationInOpenStateMs: 5000,
-  permittedNumberOfCallsInHalfOpenState: 2,
-};
+export const INVENTORY_BREAKER: BreakerConfig = CONFIG.inventoryBreaker;
 
-const TIME_LIMIT_MS = 800;
+const TIME_LIMIT_MS = CONFIG.inventoryTimeLimitMs;
 
 /**
  * Accepts orders, drives the saga and emits compensation. Also hosts the read-your-writes stock
@@ -202,14 +197,6 @@ export class OrderService extends Service {
       value: value ?? null,
       onDone,
     });
-  }
-
-  breakerState() {
-    return this.breaker.state;
-  }
-
-  cachedStock(sku: string): StockView | undefined {
-    return this.lastKnown.get(sku)?.view;
   }
 
   protected handle(record: BusRecord, now: number): void {

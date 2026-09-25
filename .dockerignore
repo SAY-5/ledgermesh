@@ -1,0 +1,9 @@
+.git/
+target/
+**/target/
+web/
+chaos/out/
+.idea/
+*.iml
+.vscode/
+*.log

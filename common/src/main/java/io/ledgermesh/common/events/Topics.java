@@ -24,19 +24,35 @@ public final class Topics {
   /** Suffix of the dead letter topic that shadows every business topic. */
   public static final String DLQ_SUFFIX = ".dlq";
 
+  /** Suffix of the terminal topic that keeps dead letters whose replays are used up. */
+  public static final String PARKED_SUFFIX = ".parked";
+
   private Topics() {}
 
   public static String dlq(String topic) {
-    return topic + DLQ_SUFFIX;
+    return sourceOf(topic) + DLQ_SUFFIX;
+  }
+
+  public static String parked(String topic) {
+    return sourceOf(topic) + PARKED_SUFFIX;
   }
 
   public static boolean isDlq(String topic) {
     return topic.endsWith(DLQ_SUFFIX);
   }
 
-  public static String sourceOf(String dlqTopic) {
-    return isDlq(dlqTopic)
-        ? dlqTopic.substring(0, dlqTopic.length() - DLQ_SUFFIX.length())
-        : dlqTopic;
+  public static boolean isParked(String topic) {
+    return topic.endsWith(PARKED_SUFFIX);
+  }
+
+  /** The business topic behind a dead letter or parked topic; a business topic maps to itself. */
+  public static String sourceOf(String topic) {
+    if (isDlq(topic)) {
+      return topic.substring(0, topic.length() - DLQ_SUFFIX.length());
+    }
+    if (isParked(topic)) {
+      return topic.substring(0, topic.length() - PARKED_SUFFIX.length());
+    }
+    return topic;
   }
 }

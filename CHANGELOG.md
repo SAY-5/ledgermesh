@@ -1,6 +1,9 @@
 # Changelog
 
-## v5.0.0
+Dates are the commit dates of the release tags. Each numbered release is a demo milestone;
+see the versioning note in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## v5.0.0 (2026-09-10)
 
 * `GET /ops/overview` on every service: health, consumer lag, dead letter depth, breaker states
   and, on the order service, in flight and stuck sagas with the count per state.
@@ -8,7 +11,7 @@
 * A `tight` chaos profile runs the existing harness with six kills and a two second restart, and
   the chaos summary now ends with the overview of all three services.
 
-## v4.0.0
+## v4.0.0 (2026-09-10)
 
 * `POST /orders` accepts an `Idempotency-Key`. The first call stores the answer it returned in the
   same transaction as the order, and a repeat is answered from that store with `Idempotent-Replay`
@@ -19,7 +22,7 @@
   unpublished is recognised as the crash window between the send and the ack, sent again and
   counted in `ledgermesh.outbox.resends`.
 
-## v3.0.0
+## v3.0.0 (2026-09-10)
 
 * Every business topic has a `<topic>.dlq` shadow. A record whose handler keeps failing is retried
   in place with exponential backoff and then dead lettered with its original coordinates and the
@@ -32,7 +35,7 @@
   from broker offsets, and `ledgermesh.consumer.delivery.failures{topic}` counts failed deliveries.
 * The producer refuses to start with settings that would break the relay's delivery guarantees.
 
-## v2.0.0
+## v2.0.0 (2026-09-08)
 
 * Per step saga deadlines on the order row, with a reaper that cancels a reservation that never
   answered, re-drives a silent payment once and then cancels it.
@@ -41,7 +44,7 @@
 * `GET /orders/{id}/timeline` returns every saga step with a timestamp; `deadlineAt` and `redrives`
   appear on the order response.
 
-## v1.0.0
+## v1.0.0 (2026-09-08)
 
 * Order, inventory and payment services on Kafka with a transactional outbox, idempotent consumers
   and a compensating saga.

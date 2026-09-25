@@ -31,8 +31,9 @@ drain and asserts every order reached CONFIRMED or a legitimate out of stock CAN
   reaper cancels reservations that never answer and re-drives silent payments once before
   cancelling. Each step is appended to a per order timeline. `GET /stock/{sku}` is a
   read-your-writes lookup wrapped in `@CircuitBreaker` + `@TimeLimiter` with a cache fallback.
-* **inventory-service** (8082): reserves stock atomically for all lines of an order, releases it
-  on cancellation, serves stock levels from Redis with write-through and TTL.
+* **inventory-service** (8082): reserves stock atomically for all lines of an order and records
+  the hold per order and sku, releases exactly that hold on cancellation, serves stock levels from
+  Redis with write-through and TTL.
 * **payment-service** (8083): authorizes against a deterministic synthetic processor behind
   `Retry(CircuitBreaker(TimeLimiter(call)))`; exhaustion defers the payment to a retry queue,
   never drops it. A re-drive from the order service is answered with the outcome on file or a
@@ -110,7 +111,7 @@ Output lands in `chaos/out/` (orders, kill timeline, metric snapshots, summary).
 
 ```bash
 make lint     # spotless (google-java-format)
-make test     # mvn verify: 83 unit tests + 12 integration tests
+make test     # mvn verify: 89 unit tests + 14 integration tests
 ```
 
 Unit tests (H2, no Docker): saga state machine transitions and compensation, deadline reaper
@@ -118,8 +119,12 @@ Unit tests (H2, no Docker): saga state machine transitions and compensation, dea
 timeline endpoint, outbox relay ordering and re-send behaviour, idempotent consumer, breaker and
 time limiter fallbacks, cache write-through after commit, atomic and concurrent reservations,
 retry / breaker / deferred queue, re-drive answers, deterministic processor, the replay cap that
-turns a record into a parked poison message, the request deduplication store, the relay counting a
-send that never confirmed, the open and overdue saga counts behind the ops overview.
+turns a record into a parked poison message, the replayer committing only the offsets it handled
+and waiting for its group assignment before it treats silence as an empty topic, the request
+deduplication store, the relay counting a send that never confirmed, the open and overdue saga
+counts behind the ops overview, and the reservation ledger (a release credits what the order held,
+a release before the reservation is a no-op that blocks the late reservation, a repeated
+reservation takes stock once).
 
 Integration tests (`e2e-tests`, Testcontainers Redpanda + Postgres + Redis, all three services
 booted in one JVM): an order flows to CONFIRMED end to end, out of stock and declined payment
@@ -127,10 +132,13 @@ paths with stock release, triple delivery of the same event reserves stock once,
 listener stopped mid-flight confirms after restart, an inventory service restarted with twelve
 orders in flight confirms all of them, and a record that can never be processed reaches the dead
 letter topic after the configured attempts without holding up the record behind it, is replayed
-once, and is parked on the second replay. Exactly once at the boundary has a class of its own: the
-same idempotency key twice and two calls racing on one key each place one order and return one body,
-and an outbox row put back into the crash window is sent again, ignored by the consumer, and leaves
-the stock ledger and the payment unchanged. The ops overview is checked against a listener that is
+once, is parked on the second replay and is then listed by `GET /admin/dlq/parked` with its replay
+count and original coordinates. A release that reaches inventory before the reservation it undoes
+leaves stock untouched and the late reservation is rejected. Exactly once at the boundary has a class of its own: the
+same idempotency key twice, two calls racing on one key, and the same key retried across a restart
+of the order service each place one order and return one body, and an outbox row put back into the
+crash window is sent again, ignored by the consumer, and leaves the stock ledger and the payment
+unchanged. The ops overview is checked against a listener that is
 stopped and started again: lag rises and falls, the order shows up as in flight and then does not,
 and the services that do not own the saga report the rest of the page without it.
 
@@ -144,8 +152,9 @@ and the services that do not own the saga report the rest of the page without it
 | GET | `/stock/{sku}` | order | live value from inventory, or `source: cache` / `unknown` under the breaker |
 | GET | `/stock/{sku}` | inventory | cache first, database on miss |
 | PUT | `/stock/{sku}` | inventory | body `{available}`; creates or restocks |
-| GET | `/ops/overview` | all | health, consumer lag, dead letter depth, breaker states and, on the order service, in flight and stuck sagas |
+| GET | `/ops/overview` | all | health, consumer lag, dead letter depth, parked depth, breaker states and, on the order service, in flight and stuck sagas |
 | GET | `/admin/dlq` | all | dead letters per source topic that this service has not replayed or parked |
+| GET | `/admin/dlq/parked` | all | records parked on `<topic>.parked` per source topic, with their replay count, original coordinates and exception |
 | POST | `/admin/dlq/{topic}/replay` | all | puts dead letters back on `{topic}`; `max` caps the batch, answer is `{replayed, parked}` |
 | GET | `/actuator/health/readiness`, `/actuator/prometheus`, `/actuator/circuitbreakers` | all | probes and metrics |
 
@@ -164,8 +173,8 @@ Customers whose id ends with `-declined` and amounts above 10000 are declined by
 | `order.payment_requested` | order | payment |
 
 Three partitions each, keyed by order id, JSON payloads, `x-correlation-id` and `event-id`
-headers. Every topic has a single partition `<topic>.dlq` shadow. Topics are created on startup by
-the first service up.
+headers. Every topic has single partition `<topic>.dlq` and `<topic>.parked` shadows. Topics are created on
+startup by the first service up.
 
 ## CI
 
@@ -224,16 +233,19 @@ A payload that cannot be decoded skips the retries. Failed deliveries are counte
 attempts a record burned stay visible after it has left the topic.
 
 `POST /admin/dlq/{topic}/replay?max=100` reads dead letters with a dedicated consumer group,
-republishes each one on its source topic with the original key, value and headers, and only then
-commits, so a crash during a replay repeats a record rather than dropping it. Consumers that already
-applied the event ignore the replay by event id. Each replay stamps a `dlq-replay-count` header;
-once a record has used up `ledgermesh.dlq.max-replays` (default 3) the replayer parks it instead of
-republishing, which is what ends the loop between a topic and its dead letter shadow.
-`GET /admin/dlq` reports what is still waiting.
+republishes each one on its source topic with the original key, value and headers, and commits only
+the offsets it handled, so a crash during a replay repeats a record rather than dropping it and a
+batch cut short by `max` leaves the rest for the next call. Consumers that already applied the
+event ignore the replay by event id. Each replay stamps a `dlq-replay-count` header; once a record
+has used up `ledgermesh.dlq.max-replays` (default 3) the replayer parks it instead of republishing:
+the record is copied to `<topic>.parked` with all of its headers, which ends the loop between a
+topic and its dead letter shadow without losing the record. `GET /admin/dlq` reports what is still
+waiting and `GET /admin/dlq/parked` what was parked.
 
-Two gauges are recomputed from broker offsets every five seconds:
-`ledgermesh.consumer.lag{group,topic}` (end offset minus committed offset over all partitions) and
-`ledgermesh.dlq.depth{topic}` (the same difference for the replay group on the dead letter topic).
+Three gauges are recomputed from broker offsets every five seconds:
+`ledgermesh.consumer.lag{group,topic}` (end offset minus committed offset over all partitions),
+`ledgermesh.dlq.depth{topic}` (the same difference for the replay group on the dead letter topic)
+and `ledgermesh.dlq.parked.depth{topic}` (records retained on the parked topic).
 
 ## Ops overview
 
@@ -245,6 +257,7 @@ Two gauges are recomputed from broker offsets every five seconds:
   "health": "UP",
   "consumerLag": { "order-service|inventory.reserved": 0 },
   "deadLetterDepth": { "order.created": 0 },
+  "parkedDepth": { "order.created": 0 },
   "breakers": { "inventory": "CLOSED" },
   "sagas": { "inFlight": 2, "stuck": 0, "byState": { "PENDING": 1, "RESERVED": 1 } }
 }
@@ -285,5 +298,6 @@ inventory-service/  reservations, Redis cache, stock API
 payment-service/    authorizer, deferred queue, synthetic processor
 e2e-tests/          Testcontainers integration tests
 deploy/             docker-compose.yml (Redpanda, Redis, Postgres, three services)
-chaos/              run.sh, loadgen.py, report.py
+chaos/              run.sh, loadgen.py, report.py, evidence/ (recorded summaries)
+web/                browser demo: a TypeScript simulation of the v1 mechanisms (see web/README.md)
 ```
