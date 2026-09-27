@@ -23,7 +23,7 @@ sys.path.insert(0, str(REPO / "chaos"))
 import loadgen  # noqa: E402  the order mix comes from the harness's own constants
 
 # The chaos job of the workflow run named here, on a GitHub hosted runner, drawing its own seed.
-CI_RUN = {"id": "36290534323", "commit": "d24a5a9", "seed": "78774", "p95": "50872"}
+CI_RUN = {"id": "36293910826", "commit": "e6a4dd3", "seed": "82863", "p95": "54489"}
 
 RUNS = {
     "baseline": "chaos/evidence/baseline/summary.txt",
@@ -299,8 +299,8 @@ non zero when the p95 is above it. Both CI pipelines set 90000 ms on their chaos
 recorded three kill runs above held the same ceiling. The number is deliberately loose, because the
 same profile costs very different amounts on different hosts: the two recorded three kill runs
 report a p95 of {cl[1]} ms and {latency(chaos2)[1]} ms on the developer machine, and the chaos job of
-run {CI_RUN["id"]}, at commit `{CI_RUN["commit"]}` on a GitHub hosted runner and at a seed of its
-own ({CI_RUN["seed"]}), reported {CI_RUN["p95"]} ms. A ceiling that would catch a doubling on the
+run {CI_RUN["id"]}, for commit `{CI_RUN["commit"]}` of this branch on a GitHub hosted runner and at
+a seed of its own ({CI_RUN["seed"]}), reported {CI_RUN["p95"]} ms. A ceiling that would catch a doubling on the
 faster host would fail on the slower one for no reason, so this one catches a gross regression
 rather than a subtle one.
 

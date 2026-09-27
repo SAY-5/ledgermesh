@@ -164,10 +164,10 @@ Because of that, the gate on latency is a ceiling rather than an expected value:
 zero when the p95 is above it. Both CI pipelines set 90000 ms on their chaos job, and the recorded
 three kill runs above held the same ceiling. The number is deliberately loose, because the same
 profile costs very different amounts on different hosts: the two recorded three kill runs report a
-p95 of 35109 ms and 30649 ms on the developer machine, and the chaos job of run 36290534323, at
-commit `d24a5a9` on a GitHub hosted runner and at a seed of its own (78774), reported 50872 ms. A
-ceiling that would catch a doubling on the faster host would fail on the slower one for no reason,
-so this one catches a gross regression rather than a subtle one.
+p95 of 35109 ms and 30649 ms on the developer machine, and the chaos job of run 36293910826, for
+commit `e6a4dd3` of this branch on a GitHub hosted runner and at a seed of its own (82863), reported
+54489 ms. A ceiling that would catch a doubling on the faster host would fail on the slower one for
+no reason, so this one catches a gross regression rather than a subtle one.
 
 Knobs: `CHAOS_PROFILE` (`steady` three kills restarting after 5 s, `tight` six kills restarting
 after 2 s), `CHAOS_DURATION`, `CHAOS_RATE`, `CHAOS_KILLS`, `CHAOS_RESTART_AFTER`, `CHAOS_VICTIMS`
