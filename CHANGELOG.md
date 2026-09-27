@@ -3,6 +3,25 @@
 Dates are the commit dates of the release tags. Each numbered release is a demo milestone;
 see the versioning note in [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Unreleased
+
+* Dead letter replay commits only the offsets it handled and waits for its group assignment before
+  treating silence as an empty topic, and a record whose replays are used up is copied to a
+  retained `<topic>.parked` topic and listed by `GET /admin/dlq/parked` instead of vanishing.
+* Inventory keeps a reservation row per order and sku: a release credits exactly what that order
+  held, a release that arrives before its reservation leaves stock untouched and blocks the late
+  reservation, and a repeated reservation takes stock once.
+* The chaos harness kills the order service as well, sends an `Idempotency-Key` per order and
+  retries it while intake is away, seeds the kill schedule from `CHAOS_SEED`, tears the stack down
+  on every exit path, stamps commit, host, Docker version and knobs into the summary, records runs
+  under `chaos/evidence/` with `CHAOS_RECORD=1`, and fails a run whose p95 saga latency exceeds
+  `CHAOS_MAX_P95`.
+* Both pipelines run the browser demo's type check, its two generator checks, its bundle and its
+  self-check, and set the p95 ceiling on the chaos job.
+* The browser demo labels every figure measured or simulated, reads its constants from the
+  services' configuration and its measured figures from the recorded runs, and replaces the service
+  map with a readable list on narrow viewports.
+
 ## v5.0.0 (2026-09-10)
 
 * `GET /ops/overview` on every service: health, consumer lag, dead letter depth, breaker states
