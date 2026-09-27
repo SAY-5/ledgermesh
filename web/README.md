@@ -71,7 +71,10 @@ edit in the services cannot leave the page quietly wrong.
 `chaos/evidence/` into `src/sim/measured.generated.ts`, including the raw text of each summary. Every
 figure the page presents as measured is built from that module, and the self-check asserts each
 number it renders appears in the summary it claims to come from. A figure typed by hand fails the
-check.
+check. The permalink the hero prints beside the figures is read out of the history rather than kept
+as a constant, so commit a recorded summary before running `npm run measured`: the generator reads
+the commit that carries the summary, refuses while the file differs from its committed version, and
+needs the full history rather than a shallow clone.
 
 ## What this page does not simulate
 

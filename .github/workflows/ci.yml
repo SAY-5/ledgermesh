@@ -62,6 +62,9 @@ jobs:
         working-directory: web
     steps:
       - uses: actions/checkout@v4
+        with:
+          # the measured check reads the commit that carries each summary from the history
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
