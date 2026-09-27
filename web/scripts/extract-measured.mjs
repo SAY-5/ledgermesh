@@ -36,8 +36,11 @@ function git(args) {
  * constant, so a permalink still naming the earlier recording passed, and a reader cannot tell that
  * version apart from the current one.
  *
- * The commit is keyed on the content, not on the last commit to touch the path: it is the first
- * commit whose tree holds the blob the working copy holds. A later commit that touches the file
+ * The commit is keyed on the content, not on the last commit to touch the path: it is the oldest
+ * commit git log reports as adding the blob the working copy holds at that path, and each one it
+ * reports is checked to hold that blob, so whichever is found, the link shows those bytes. A merge
+ * counts, compared with its first parent, since git log would otherwise not diff merges and a
+ * conflict resolved to new text would have no commit at all. A later commit that touches the file
  * without changing its bytes, or restores bytes it held before, leaves the link where it was; a
  * re-recorded summary moves it, and `--check` fails until the generated file is refreshed. A working
  * copy that differs from the version committed at HEAD is refused, and so is a shallow clone, whose
@@ -66,7 +69,9 @@ function blobCommit(path, raw) {
   }
   // Every commit that adds or removes the blob at this path, newest first. The ones whose tree
   // holds it introduced it; the last of those introduced it first.
-  const introduced = git(["log", "--format=%H", `--find-object=${blob}`, "--", path])
+  const introduced = git([
+    "log", "--format=%H", "--diff-merges=first-parent", `--find-object=${blob}`, "--", path,
+  ])
     .split("\n")
     .filter((commit) => commit && blobAt(commit, path) === blob);
   const commit = introduced.at(-1);
