@@ -172,18 +172,7 @@ function MapStack({ state }: { state: MapState }) {
         })}
       </ul>
       <dl className="map-stack-rows mono">
-        <div>
-          <dt>breaker inventory</dt>
-          <dd className={state.breakers ? `state-${state.breakers.inventory}` : ""}>
-            {state.breakers ? state.breakers.inventory : "CLOSED"}
-          </dd>
-        </div>
-        <div>
-          <dt>breaker processor</dt>
-          <dd className={state.breakers ? `state-${state.breakers.processor}` : ""}>
-            {state.breakers ? state.breakers.processor : "CLOSED"}
-          </dd>
-        </div>
+        {/* the two constants hold whether or not a run is driving this map */}
         <div>
           <dt>Redis stock cache</dt>
           <dd>TTL {CONFIG.cacheTtlMs / 1000} s</dd>
@@ -192,19 +181,31 @@ function MapStack({ state }: { state: MapState }) {
           <dt>stock check time limit</dt>
           <dd>{CONFIG.inventoryTimeLimitMs} ms</dd>
         </div>
-        {lag.length > 0 ? (
-          lag.map((l) => (
-            <div key={l.key}>
-              <dt>{l.topic}</dt>
-              <dd>{l.value} waiting</dd>
-            </div>
-          ))
-        ) : (
+        {/* breaker and lag rows appear only where a run reports them */}
+        {state.breakers ? (
+          <div>
+            <dt>breaker inventory</dt>
+            <dd className={`state-${state.breakers.inventory}`}>{state.breakers.inventory}</dd>
+          </div>
+        ) : null}
+        {state.breakers ? (
+          <div>
+            <dt>breaker processor</dt>
+            <dd className={`state-${state.breakers.processor}`}>{state.breakers.processor}</dd>
+          </div>
+        ) : null}
+        {state.lag && lag.length === 0 ? (
           <div>
             <dt>topics</dt>
             <dd>nothing waiting</dd>
           </div>
-        )}
+        ) : null}
+        {lag.map((l) => (
+          <div key={l.key}>
+            <dt>{l.topic}</dt>
+            <dd>{l.value} waiting</dd>
+          </div>
+        ))}
       </dl>
     </div>
   );
