@@ -74,8 +74,7 @@ class IdempotentConsumerTest {
   }
 
   @Test
-  void aDeliveryThatMarksTheEventAfterAnotherCommittedItFailsSoItsWorkRollsBack()
-      throws Exception {
+  void aDeliveryThatMarksTheEventAfterAnotherCommittedItFailsSoItsWorkRollsBack() throws Exception {
     CountDownLatch checked = new CountDownLatch(1);
     CountDownLatch firstCommitted = new CountDownLatch(1);
     ExecutorService pool = Executors.newSingleThreadExecutor();

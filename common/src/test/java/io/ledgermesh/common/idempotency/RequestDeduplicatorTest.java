@@ -80,8 +80,7 @@ class RequestDeduplicatorTest {
   }
 
   @Test
-  void aRequestThatStoresAfterTheFirstCommittedFailsInsteadOfReplacingItsAnswer()
-      throws Exception {
+  void aRequestThatStoresAfterTheFirstCommittedFailsInsteadOfReplacingItsAnswer() throws Exception {
     CountDownLatch lookedUp = new CountDownLatch(1);
     CountDownLatch firstCommitted = new CountDownLatch(1);
     ExecutorService pool = Executors.newSingleThreadExecutor();
