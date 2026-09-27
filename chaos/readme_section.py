@@ -204,9 +204,11 @@ landed = {key: ", ".join(f'{k["service"]} at t+{k["landed"]} s' for k in kills)
           for key, kills in timelines.items()}
 apart = sorted(abs(a["landed"] - b["landed"]) for a, b in zip(*timelines.values()))
 # Runs recorded before run.sh wrote each kill's target carry none; the prose says so rather than
-# replaying the draw.
-drawn = all(k["target"] is not None for kills in timelines.values() for k in kills)
-if drawn:
+# replaying the draw. It compares the two runs, so both must be on the same side.
+drawn = {all(k["target"] is not None for k in kills) for kills in timelines.values()}
+if len(drawn) != 1:
+    raise SystemExit("only one of the two kill runs records the targets it drew; record both")
+if drawn.pop():
     targets = [", ".join(f't+{k["target"]} s' for k in kills) for kills in timelines.values()]
     late = sorted(k["landed"] - k["target"] for kills in timelines.values() for k in kills)
     target_note = (f"The `kills.jsonl` beside each summary also records the targets the harness "
