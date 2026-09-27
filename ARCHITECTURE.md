@@ -71,7 +71,8 @@ winner is still in flight waits on the key until the winner commits and then fai
 inserts after the commit fails at once. Both cases depend on the answer being inserted rather than
 merged: the key is assigned, not generated, and a merge reads the row first, so it would find a
 winner that had already committed and overwrite its answer instead of failing. `IdempotentRequest`
-and the consumers' `ProcessedEvent` marker therefore always report themselves as new.
+and the consumers' `ProcessedEvent` marker therefore tell the repository that an instance built in
+code is new until it has been inserted, so saving it inserts rather than merges.
 
 ## Idempotent consumers
 
