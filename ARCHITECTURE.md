@@ -66,7 +66,12 @@ while the saga moves the order on underneath it.
 
 The race between two calls on one key is settled by the primary key of the store. Both run the work,
 both try to insert, one insert wins; the loser's transaction takes its order, outbox row and
-timeline entry down with it, and it returns the winner's answer.
+timeline entry down with it, and it returns the winner's answer. A loser that inserts while the
+winner is still in flight waits on the key until the winner commits and then fails; one that
+inserts after the commit fails at once. Both cases depend on the answer being inserted rather than
+merged: the key is assigned, not generated, and a merge reads the row first, so it would find a
+winner that had already committed and overwrite its answer instead of failing. `IdempotentRequest`
+and the consumers' `ProcessedEvent` marker therefore always report themselves as new.
 
 ## Idempotent consumers
 
@@ -79,6 +84,8 @@ after the listener returns (`ack-mode: record`, `enable.auto.commit=false`).
   committed, the record is redelivered and processed from scratch
 * process killed after commit but before the offset commit: the record is redelivered, the marker
   exists, the work is skipped and the offset is committed
+* two deliveries of one event in flight at once: the second marker insert fails on the primary
+  key, its transaction takes the work down with it, and the retry finds the marker and skips
 
 The order state machine adds a second layer: a transition is only valid from specific states and
 terminal orders never move, so even a duplicate that slips through by a different event id (for
