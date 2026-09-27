@@ -70,7 +70,8 @@ make chaos-baseline  # the same load with no kills, the reference for the latenc
 ```
 
 Two runs are recorded in the repository, written by the harness rather than copied into prose:
-[chaos/evidence/baseline/summary.txt](chaos/evidence/baseline/summary.txt) with no kills and [chaos/evidence/steady/summary.txt](chaos/evidence/steady/summary.txt) with three.
+[chaos/evidence/baseline/summary.txt](chaos/evidence/baseline/summary.txt) with no kills, and
+[chaos/evidence/steady/summary.txt](chaos/evidence/steady/summary.txt) with three.
 `CHAOS_RECORD=1` refreshes the file for the profile in effect. Every recorded summary opens with the
 commit it was taken at, the UTC date, the host, the Docker server version and each `CHAOS_*` knob
 that was set, so a reader can repeat it.
