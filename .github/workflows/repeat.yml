@@ -44,7 +44,8 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: maven
-      - run: mvn -B --no-transfer-progress -DskipTests install
+      # e2e-tests has no jar to install; each run below resolves the services from the local repo
+      - run: mvn -B --no-transfer-progress -DskipTests install -pl '!e2e-tests'
       - name: run the class on a fresh stack each time
         run: |
           reports=e2e-tests/target/failsafe-reports
