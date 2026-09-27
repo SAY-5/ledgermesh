@@ -5,6 +5,12 @@ see the versioning note in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Unreleased
 
+* Two calls racing on one `Idempotency-Key` could both place an order. The answer was saved with a
+  merge, which reads the row first: a call that stored its answer after the other had committed
+  found that row and overwrote it instead of failing on the primary key, and both orders were
+  reserved, charged and confirmed. The answer and the consumers' processed markers are now always
+  inserted, and the `repeat` workflow runs `ExactlyOnceIT` 50 times on every pull request that
+  changes that code.
 * Dead letter replay commits only the offsets it handled and waits for its group assignment before
   treating silence as an empty topic, and a record whose replays are used up is copied to a
   retained `<topic>.parked` topic and listed by `GET /admin/dlq/parked` instead of vanishing.
