@@ -3,6 +3,7 @@
 // src/sim/measured.generated.ts, so every figure the page presents as measured comes from a run
 // that is committed to this repository, together with the raw text it was read from. Standard
 // library only. Usage: node scripts/extract-measured.mjs [--check]
+import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,21 +12,50 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "..", "..");
 const target = resolve(here, "..", "src", "sim", "measured.generated.ts");
 
-// `blobCommit` is the commit that carries the summary, so the page can link to a permalink that
-// resolves on any branch. Re-derive it after recording a run:
-//   git log -1 --format=%H -- chaos/evidence/<label>/summary.txt
 const RUNS = [
-  {
-    key: "baseline",
-    path: "chaos/evidence/baseline/summary.txt",
-    blobCommit: "8a0922c1b86d8b285e7f20433243e7af94a7805b",
-  },
-  {
-    key: "chaos",
-    path: "chaos/evidence/steady/summary.txt",
-    blobCommit: "37414de80a3bdc26bd943c11e6c848241b85a6cd",
-  },
+  { key: "baseline", path: "chaos/evidence/baseline/summary.txt" },
+  { key: "chaos", path: "chaos/evidence/steady/summary.txt" },
 ];
+
+function git(args) {
+  try {
+    return execFileSync("git", args, { cwd: repo, encoding: "utf8", maxBuffer: 1 << 24 });
+  } catch (err) {
+    const detail = String(err.stderr || err.message).trim();
+    throw new Error(`git ${args.join(" ")} failed: ${detail}`);
+  }
+}
+
+/**
+ * The commit that carries `path`, read from this repository's own history, so the page links to a
+ * permalink that shows the bytes the figures were read from.
+ *
+ * This used to be a `blobCommit` constant beside each run, re-derived by hand. Nothing tied the
+ * constant to the file, so a re-recorded summary left the link resolving against an older version
+ * of it, which a reader cannot tell apart from the current one, and `--check` regenerated from the
+ * same constant and so could not catch the drift. Derived here instead, the commit moves with the
+ * file: `--check` re-reads it from the history and fails until the generated file is refreshed, and
+ * the blob comparison below fails while the recorded run is still uncommitted.
+ */
+function blobCommit(path, raw) {
+  if (git(["rev-parse", "--is-shallow-repository"]).trim() === "true") {
+    throw new Error(
+      "the history is truncated by a shallow clone, so the commit that carries the summary " +
+        "cannot be identified. Run `git fetch --unshallow`, or check out with fetch-depth: 0",
+    );
+  }
+  const commit = git(["log", "-1", "--format=%H", "--", path]).trim();
+  if (!/^[0-9a-f]{40}$/.test(commit)) {
+    throw new Error("no commit in this history touches it; commit the recorded run first");
+  }
+  if (git(["cat-file", "blob", `${commit}:${path}`]) !== raw) {
+    throw new Error(
+      `differs from its committed version at ${commit}: commit the recorded run, then run ` +
+        "`npm run measured`, so the link resolves to the text these figures were read from",
+    );
+  }
+  return commit;
+}
 
 function field(raw, label) {
   const m = raw.match(new RegExp(`^  ${label}\\s+(.*)$`, "m"));
@@ -117,7 +147,12 @@ const runs = {};
 for (const run of RUNS) {
   const raw = readFileSync(resolve(repo, run.path), "utf8");
   try {
-    runs[run.key] = { source: run.path, blobCommit: run.blobCommit, ...parse(raw), raw };
+    runs[run.key] = {
+      source: run.path,
+      blobCommit: blobCommit(run.path, raw),
+      ...parse(raw),
+      raw,
+    };
   } catch (err) {
     throw new Error(`${run.path}: ${err.message}`);
   }
