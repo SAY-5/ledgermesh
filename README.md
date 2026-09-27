@@ -69,12 +69,17 @@ make chaos-tight     # the same run with six kills and a two second restart
 make chaos-baseline  # the same load with no kills, the reference for the latency lines
 ```
 
-Two runs are recorded in the repository, written by the harness rather than copied into prose:
-[chaos/evidence/baseline/summary.txt](chaos/evidence/baseline/summary.txt) with no kills, and
-[chaos/evidence/steady/summary.txt](chaos/evidence/steady/summary.txt) with three.
-`CHAOS_RECORD=1` refreshes the file for the profile in effect. Every recorded summary opens with the
-commit it was taken at, the UTC date, the host, the Docker server version and each `CHAOS_*` knob
-that was set, so a reader can repeat it.
+Four runs are recorded in the repository, written by the harness rather than copied into prose:
+[baseline](chaos/evidence/baseline/summary.txt),
+[baseline-repeat](chaos/evidence/baseline-repeat/summary.txt),
+[steady](chaos/evidence/steady/summary.txt),
+[steady-repeat](chaos/evidence/steady-repeat/summary.txt). All four ran at `CHAOS_SEED=3`, two of
+them with no kills and two with three kills. This section is written by
+[chaos/readme_section.py](chaos/readme_section.py) from those files, and `uv run python
+chaos/readme_section.py --check` fails when it has drifted from them. `CHAOS_RECORD=1` writes the
+summary of the profile in effect, under the name `CHAOS_LABEL` gives it. Every recorded summary
+opens with the commit it was taken at, the UTC date, the host, the Docker server version and each
+`CHAOS_*` knob that was set, so a reader can repeat it.
 
 | | no kills | three kills |
 |---|---|---|
@@ -121,34 +126,52 @@ LedgerMesh chaos summary
   stuck orders         0
 ```
 
-`failed / stuck` counts orders that did not reach a terminal state, orders cancelled for any
-reason other than stock, and rejected submissions. `cancelled (stock)` are orders for
-`SKU-SCARCE`, which is seeded with 40 units so the out of stock branch is exercised on every run.
-Retries, deferred payments and breaker transitions come from the synthetic processor's
-deterministic transient faults and from the kills themselves. Counters are snapshotted right
-before each kill because a killed JVM loses its in-memory meters. The last seven lines are the
-`/ops/overview` of each service read after the backlog drained.
+`failed / stuck` counts orders that did not reach a terminal state, orders cancelled for any reason
+other than stock, and rejected submissions. `cancelled (stock)` are orders for `SKU-SCARCE`, which
+is seeded with 40 units so the out of stock branch is exercised on every run. Retries, deferred
+payments and breaker transitions come from the synthetic processor's deterministic transient faults
+and from the kills themselves. Counters are snapshotted right before each kill because a killed JVM
+loses its in-memory meters. The last seven lines are the `/ops/overview` of each service read after
+the backlog drained.
 
-The counts are a function of the seed: both runs above used `CHAOS_SEED=3`, and both submitted
-1200 orders and cancelled the same 53 for stock. The latency lines
-are not, which is why every summary carries its host and its date. Order ids are fresh UUIDs, so
-which orders meet a transient processor fault differs from run to run, and the queue that builds
-behind a killed service moves with whatever else the machine is doing; a re-recording on a busier
-host reports materially different figures at the same seed. Each latency line is one measurement of
-one run, not a specification.
+The seed fixes the load and the kill schedule. Replaying the draw sequence of
+[chaos/loadgen.py](chaos/loadgen.py) at seed 3 for the 1200 orders of this profile gives 74 orders
+for `SKU-SCARCE` asking for 145 units, of which the 40 seeded units cover the first 21 exactly.
+Replaying the schedule that [chaos/run.sh](chaos/run.sh) draws at the same seed gives
+inventory-service at t+15 s, order-service at t+32 s, payment-service at t+48 s.
+
+The seed does not fix which orders land in which bucket. The two three kill runs above ran the same
+load on the same host and confirmed 1147 and 1148 orders, cancelling 53 and 52 for stock:
+
+| run | commit | submitted | confirmed | cancelled, out of stock | saga p95 |
+|---|---|---|---|---|---|
+| [baseline](chaos/evidence/baseline/summary.txt) | `c1c6fb3` | 1200 | 1147 | 53 | 4532 ms |
+| [baseline-repeat](chaos/evidence/baseline-repeat/summary.txt) | `d24a5a9` | 1200 | 1147 | 53 | 2884 ms |
+| [steady](chaos/evidence/steady/summary.txt) | `8a0922c` | 1200 | 1147 | 53 | 35109 ms |
+| [steady-repeat](chaos/evidence/steady-repeat/summary.txt) | `d24a5a9` | 1200 | 1148 | 52 | 30649 ms |
+
+Reservations reach the inventory service concurrently rather than in the order they were submitted,
+and 40 units cover one order more or one order fewer depending on which quantities arrive first, so
+the split moves by an order while the total does not. The moment a kill lands is not fixed either,
+because each kill waits for the service the previous one killed to report ready again: the six kills
+of those two runs landed between 1 s and 5 s after the targets drawn above. The latency lines, the
+retry, probe and breaker counts, and the duplicates the consumers ignore all move with whatever else
+the machine is doing. What repeats in all four runs: 1200 orders submitted, every one of them
+terminal, nothing cancelled for any reason other than stock, and no submission refused.
 
 Because of that, the gate on latency is a ceiling rather than an expected value: with
-`CHAOS_MAX_P95` set, the summary prints the ceiling and whether it held, and the harness exits
-non zero when the p95 is above it. Both CI pipelines set 90000 ms on their chaos job, and the
-recorded three kill run above held the same ceiling. The number is deliberately loose, because the
-same profile costs very different amounts on different hosts: the recorded run reports a p95 of
-35109 ms on the developer machine, and the chaos job of this branch reported 58352 ms on a GitHub
-hosted runner. A ceiling that would catch a doubling on the faster host would fail on the slower
-one for no reason, so this one catches a gross regression rather than a subtle one.
+`CHAOS_MAX_P95` set, the summary prints the ceiling and whether it held, and the harness exits non
+zero when the p95 is above it. Both CI pipelines set 90000 ms on their chaos job, and the recorded
+three kill runs above held the same ceiling. The number is deliberately loose, because the same
+profile costs very different amounts on different hosts: the two recorded three kill runs report a
+p95 of 35109 ms and 30649 ms on the developer machine, and the chaos job of run 36290534323, at
+commit `d24a5a9` on a GitHub hosted runner and at a seed of its own (78774), reported 50872 ms. A
+ceiling that would catch a doubling on the faster host would fail on the slower one for no reason,
+so this one catches a gross regression rather than a subtle one.
 
 Knobs: `CHAOS_PROFILE` (`steady` three kills restarting after 5 s, `tight` six kills restarting
 after 2 s), `CHAOS_DURATION`, `CHAOS_RATE`, `CHAOS_KILLS`, `CHAOS_RESTART_AFTER`, `CHAOS_VICTIMS`
-(default all three services), `CHAOS_SEED` (kill schedule and load mix; a fresh one is drawn and
+(default all three services), `CHAOS_SEED` (the load and the kill schedule; a fresh one is drawn and
 printed when unset), `CHAOS_MAX_P95`, `CHAOS_DRAIN_TIMEOUT`, `CHAOS_DRAIN_CAP`, `CHAOS_RECORD=1`,
 `CHAOS_LABEL`, `CHAOS_KEEP_STACK=1`, `CHAOS_PYTHON`, and `LEDGERMESH_ORDER_PORT` /
 `LEDGERMESH_INVENTORY_PORT` / `LEDGERMESH_PAYMENT_PORT` when 8081 to 8083 are taken on the host.
