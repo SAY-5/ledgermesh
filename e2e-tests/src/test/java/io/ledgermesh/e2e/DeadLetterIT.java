@@ -71,12 +71,28 @@ class DeadLetterIT {
 
     assertThat(deadLetters()).hasSize(2);
     assertThat(depth(lag)).isZero();
+    // parked is not gone: the record is retained on the parked topic and listed by the admin api
+    JsonNode parked = parked().get(Topics.ORDER_CREATED);
+    assertThat(parked.size()).isEqualTo(1);
+    assertThat(parked.get(0).get("key").asText()).isEqualTo(KEY);
+    assertThat(parked.get(0).get("replays").asInt()).isEqualTo(Stack.DLQ_MAX_REPLAYS);
+    assertThat(parked.get(0).get("originalTopic").asText()).isEqualTo(Topics.ORDER_CREATED);
+    assertThat(parkedDepth(lag)).isEqualTo(1);
     assertThat(Stack.stock(SKU)).isEqualTo(9);
   }
 
   private static long depth(KafkaLagMetrics lag) {
     lag.refresh();
     return lag.dlqDepth().get(Topics.ORDER_CREATED);
+  }
+
+  private static long parkedDepth(KafkaLagMetrics lag) {
+    lag.refresh();
+    return lag.parkedDepth().get(Topics.ORDER_CREATED);
+  }
+
+  private static JsonNode parked() {
+    return Stack.send("GET", "http://localhost:" + Stack.inventoryPort + "/admin/dlq/parked", null);
   }
 
   private static JsonNode replay(int max) {

@@ -1,9 +1,10 @@
 import type { Cluster } from "./cluster.ts";
+import { CONFIG } from "./config.generated.ts";
 import type { ServiceName } from "./events.ts";
 import { Prng } from "./prng.ts";
 
-export const SKUS = ["SKU-ALPHA", "SKU-BRAVO", "SKU-CHARLIE", "SKU-SCARCE"] as const;
-const WEIGHTS = [40, 30, 25, 5];
+export const SKUS = CONFIG.load.skus;
+const WEIGHTS = CONFIG.load.weights;
 
 export interface LoadOptions {
   rate: number;
@@ -13,8 +14,9 @@ export interface LoadOptions {
 }
 
 /**
- * Mirrors chaos/loadgen.py: a fixed order rate with weighted skus, quantities 1..3, prices 5..80,
- * and a stock probe every 500 ms against the order service's breaker protected endpoint.
+ * Mirrors chaos/loadgen.py: a fixed order rate with the weighted skus, quantity and price ranges
+ * read from that script, and a stock probe every 500 ms against the order service's breaker
+ * protected endpoint.
  */
 export class LoadGenerator {
   private readonly rng: Prng;
@@ -27,12 +29,6 @@ export class LoadGenerator {
     this.rng = new Prng(options.seed ?? 7);
   }
 
-  get elapsed(): number {
-    return this.startedAt < 0 ? 0 : Math.max(0, this.elapsedFrom);
-  }
-
-  private elapsedFrom = 0;
-
   finished(now: number): boolean {
     return this.startedAt >= 0 && now - this.startedAt >= this.options.durationMs;
   }
@@ -41,7 +37,6 @@ export class LoadGenerator {
   tick(cluster: Cluster): number {
     const now = cluster.now;
     if (this.startedAt < 0) this.startedAt = now;
-    this.elapsedFrom = now - this.startedAt;
     let count = 0;
     const interval = 1000 / this.options.rate;
     while (
@@ -49,8 +44,8 @@ export class LoadGenerator {
       this.startedAt + this.seq * interval <= now
     ) {
       const sku = this.rng.choice(SKUS, WEIGHTS);
-      const quantity = this.rng.int(1, 3);
-      const unitPrice = this.rng.int(5, 80);
+      const quantity = this.rng.int(CONFIG.load.quantity[0], CONFIG.load.quantity[1]);
+      const unitPrice = this.rng.int(CONFIG.load.unitPrice[0], CONFIG.load.unitPrice[1]);
       cluster.submit(`cust-${this.seq % 250}`, [{ sku, quantity, unitPrice }]);
       this.seq++;
       count++;

@@ -7,6 +7,8 @@ export interface RunnerOptions {
   autoStart?: boolean;
   /** re-render cadence in real ms */
   frameMs?: number;
+  /** false suspends the loop without clearing the user's intent to run */
+  enabled?: boolean;
   /** called before every step while running */
   onStep?: (cluster: Cluster) => void;
   /** return true to stop the runner */
@@ -15,6 +17,7 @@ export interface RunnerOptions {
 
 export interface Runner {
   cluster: Cluster;
+  /** the user's intent; the loop also needs `enabled` to step */
   running: boolean;
   speed: number;
   /** bumps on every rendered frame so consumers re-read the cluster */
@@ -23,8 +26,6 @@ export interface Runner {
   pause(): void;
   setSpeed(speed: number): void;
   reset(): void;
-  /** run a bounded amount of virtual time immediately */
-  advance(ms: number): void;
 }
 
 /**
@@ -40,9 +41,10 @@ export function useRunner(factory: () => Cluster, options: RunnerOptions = {}): 
   const optionsRef = useRef(options);
   optionsRef.current = options;
   speedRef.current = speed;
+  const enabled = options.enabled ?? true;
 
   useEffect(() => {
-    if (!running) return;
+    if (!running || !enabled) return;
     let raf = 0;
     let last = -1;
     let acc = 0;
@@ -73,7 +75,7 @@ export function useRunner(factory: () => Cluster, options: RunnerOptions = {}): 
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [running, cluster]);
+  }, [running, enabled, cluster]);
 
   const start = useCallback(() => setRunning(true), []);
   const pause = useCallback(() => setRunning(false), []);
@@ -83,17 +85,5 @@ export function useRunner(factory: () => Cluster, options: RunnerOptions = {}): 
     setCluster(factory());
     setFrame((f) => f + 1);
   }, [factory]);
-  const advance = useCallback(
-    (ms: number) => {
-      const until = cluster.now + ms;
-      while (cluster.now < until) {
-        optionsRef.current.onStep?.(cluster);
-        cluster.step();
-      }
-      setFrame((f) => f + 1);
-    },
-    [cluster],
-  );
-
-  return { cluster, running, speed, frame, start, pause, setSpeed, reset, advance };
+  return { cluster, running, speed, frame, start, pause, setSpeed, reset };
 }

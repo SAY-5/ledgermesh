@@ -4,13 +4,16 @@ import { useRunner } from "../hooks/useRunner.ts";
 import { Cluster, formatSummary } from "../sim/cluster.ts";
 import type { ServiceName, Trace } from "../sim/events.ts";
 import { LoadGenerator, planKills, type KillPlan } from "../sim/loadgen.ts";
+import { CHAOS_RUN, counterFigures, killTimeline, provenance } from "../sim/measured.ts";
 import { ServiceMap, type MapState } from "./ServiceMap.tsx";
 
 const DURATION_MS = 60_000;
 const RATE = 20;
 const KILLS = 3;
-const SEED = 7;
+const SEED = 3; // the seed the recorded runs used, and its plan hits both victims
 const NOTABLE = new Set(["kill", "restart", "breaker", "duplicate", "deferred", "sweep", "redelivery", "inject"]);
+// the recorded run each simulated counter is shown against, keyed by the counter's label
+const MEASURED = new Map(counterFigures(CHAOS_RUN).map((f) => [f.label, f.text]));
 
 interface Session {
   cluster: Cluster;
@@ -74,6 +77,7 @@ export function ChaosRun() {
   });
   const { cluster, running, speed, setSpeed, start, pause, reset } = runner;
   const s = session.current;
+  const plan = useMemo(() => planKills(DURATION_MS, KILLS, seed), [seed]);
   const rawStats = cluster.stats();
   const loadDone = s ? s.load.finished(cluster.now) : false;
   const phase: "idle" | "running" | "draining" | "done" =
@@ -117,7 +121,6 @@ export function ChaosRun() {
       },
       flow: phase === "running" ? 1 : phase === "draining" ? 0.6 : 0.34,
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cluster, runner.frame, phase]);
 
   const kill = (name: ServiceName) => {
@@ -125,6 +128,15 @@ export function ChaosRun() {
     cluster.kill(name, 5000);
   };
 
+  // announced once per discrete change, unlike the two logs, which are read on demand
+  const announcement =
+    phase === "idle"
+      ? "Ready to run."
+      : phase === "running"
+        ? `Running, ${cluster.kills.length} kills so far.`
+        : phase === "draining"
+          ? `Load finished, ${inFlight} orders still open.`
+          : `Settled: ${stats.submitted} orders, ${stats.failed} failed or stuck.`;
   const failedTone = stats.failed === 0 ? "is-ok" : "is-bad";
   const timelineEnd = Math.max(DURATION_MS * 1.3, cluster.now + 4000);
 
@@ -179,6 +191,9 @@ export function ChaosRun() {
               <input type="checkbox" checked={autoChaos} onChange={(e) => setAutoChaos(e.target.checked)} />
               <span>auto chaos ({KILLS} scheduled kills)</span>
             </label>
+            <span className="mono chaos-plan">
+              plan: {plan.map((k) => `${k.service.replace("-service", "")} @${k.at / 1000} s`).join(", ")}
+            </span>
             <label className="toggle seed-field">
               <span className="mono">seed</span>
               <input
@@ -214,6 +229,10 @@ export function ChaosRun() {
           </div>
         </div>
 
+        <p className="sr-only" role="status" aria-live="polite">
+          {announcement}
+        </p>
+
         <div className="chaos-grid">
           <div className="glass chaos-map">
             <div className="chaos-map-head">
@@ -221,7 +240,7 @@ export function ChaosRun() {
                 {phase === "idle"
                   ? "ready"
                   : phase === "running"
-                    ? `load · t+${elapsed.toFixed(1)} s`
+                    ? `load · virtual t+${elapsed.toFixed(1)} s`
                     : phase === "draining"
                       ? `draining · ${inFlight} open`
                       : "settled"}
@@ -263,11 +282,21 @@ export function ChaosRun() {
               <span className="mono muted">red kill · amber restart · green ready</span>
             </div>
             <KillTimeline cluster={cluster} end={timelineEnd} />
+            <p className="chart-caption mono">
+              {cluster.kills.length === 0
+                ? "no kills yet"
+                : cluster.kills
+                    .map(
+                      (k) =>
+                        `${k.service.replace("-service", "")} @${(k.at / 1000).toFixed(0)} s, back at ${(k.readyAt / 1000).toFixed(0)} s`,
+                    )
+                    .join(" · ")}
+            </p>
           </div>
         </div>
 
         <div className="chaos-bottom">
-          <div className="glass chaos-log" aria-live="polite" aria-label="Notable events">
+          <div className="glass chaos-log" role="log" aria-live="off" aria-label="Notable events">
             <span className="eyebrow">notable events</span>
             <ol className="ledger">
               <AnimatePresence initial={false}>
@@ -300,6 +329,16 @@ export function ChaosRun() {
               )}
             </div>
             <pre className="mono summary-pre">{formatSummary(stats, 60, RATE)}</pre>
+            <p className="chaos-provenance">
+              Printed by the simulation on a virtual clock. The measured line under each counter is
+              the recorded run in <code>{CHAOS_RUN.source}</code>: {CHAOS_RUN.load}, kills{" "}
+              {killTimeline(CHAOS_RUN)}, {provenance(CHAOS_RUN)}
+              {CHAOS_RUN.p95CeilingMs
+                ? `, p95 ceiling ${CHAOS_RUN.p95CeilingMs} ms ${CHAOS_RUN.p95CeilingHeld ? "held" : "breached"}`
+                : ""}
+              . The simulated kill schedule comes from this section's seed, so it lands elsewhere
+              than the recorded one, and a simulated run never refuses a submission.
+            </p>
           </div>
         </div>
       </div>
@@ -320,10 +359,12 @@ function Stat({
   tone?: string;
   big?: boolean;
 }) {
+  const measured = MEASURED.get(label);
   return (
     <div className={`stat chaos-stat ${tone} ${big ? "is-big" : ""}`}>
       <dt>{label}</dt>
       <dd className="mono">{text ?? value?.toLocaleString("en-US")}</dd>
+      {measured ? <p className="stat-measured mono">measured {measured}</p> : null}
     </div>
   );
 }
@@ -338,7 +379,6 @@ function Sparkline({ cluster, end, frame }: { cluster: Cluster; end: number; fra
   const y = (ms: number) => h - pad - (ms / maxMs) * (h - 2 * pad);
   const dots = useMemo(
     () => points.slice(-1500).map((p) => `${x(p.at).toFixed(1)},${y(p.ms).toFixed(1)}`),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [points.length, end, frame],
   );
   return (
@@ -377,9 +417,6 @@ function KillTimeline({ cluster, end }: { cluster: Cluster; end: number }) {
           <circle cx={x(k.at)} cy="31" r="4" className="mark-kill" />
           <circle cx={x(k.restartAt)} cy="31" r="3" className="mark-restart" />
           <circle cx={x(k.readyAt)} cy="31" r="3" className="mark-ready" />
-          <text x={x(k.at)} y="14" textAnchor="middle" className="mark-label">
-            {k.service.replace("-service", "")} @{Math.round(k.at / 1000)}s
-          </text>
         </g>
       ))}
       <line x1={x(cluster.now)} x2={x(cluster.now)} y1="18" y2="44" className="cursor" />
@@ -389,7 +426,7 @@ function KillTimeline({ cluster, end }: { cluster: Cluster; end: number }) {
       <text x={x(DURATION_MS)} y="58" textAnchor="middle" className="axis-label">
         60 s · load ends
       </text>
-      <text x={w - 8} y="58" textAnchor="end" className="axis-label">
+      <text x={w - 8} y="58" textAnchor="end" className="axis-label axis-label-tail">
         drain
       </text>
     </svg>

@@ -25,7 +25,6 @@ export type Outcome = { kind: "reserved"; remaining: Map<string, number> } | { k
  */
 export class InventoryService extends Service {
   readonly stock = new Map<string, StockItem>();
-  reservations = { reserved: 0, rejected: 0 };
   releases = 0;
 
   constructor(
@@ -136,7 +135,6 @@ export class InventoryService extends Service {
         reason: outcome.reason,
       };
       this.outbox.append(rejected, now);
-      this.reservations.rejected++;
       this.env.trace?.({
         t: now,
         source: "inventory-service",
@@ -158,7 +156,6 @@ export class InventoryService extends Service {
       amount: event.amount,
     };
     this.outbox.append(reserved, now);
-    this.reservations.reserved++;
     const detail = [...outcome.remaining].map(([sku, left]) => `${sku}=${left}`).join(", ");
     this.env.trace?.({
       t: now,

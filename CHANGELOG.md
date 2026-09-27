@@ -1,6 +1,28 @@
 # Changelog
 
-## v5.0.0
+Dates are the commit dates of the release tags. Each numbered release is a demo milestone;
+see the versioning note in [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Unreleased
+
+* Dead letter replay commits only the offsets it handled and waits for its group assignment before
+  treating silence as an empty topic, and a record whose replays are used up is copied to a
+  retained `<topic>.parked` topic and listed by `GET /admin/dlq/parked` instead of vanishing.
+* Inventory keeps a reservation row per order and sku: a release credits exactly what that order
+  held, a release that arrives before its reservation leaves stock untouched and blocks the late
+  reservation, and a repeated reservation takes stock once.
+* The chaos harness kills the order service as well, sends an `Idempotency-Key` per order and
+  retries it while intake is away, seeds the kill schedule from `CHAOS_SEED`, tears the stack down
+  on every exit path, stamps commit, host, Docker version and knobs into the summary, records runs
+  under `chaos/evidence/` with `CHAOS_RECORD=1`, and fails a run whose p95 saga latency exceeds
+  `CHAOS_MAX_P95`.
+* Both pipelines run the browser demo's type check, its two generator checks, its bundle and its
+  self-check, and set the p95 ceiling on the chaos job.
+* The browser demo labels every figure measured or simulated, reads its constants from the
+  services' configuration and its measured figures from the recorded runs, and replaces the service
+  map with a readable list on narrow viewports.
+
+## v5.0.0 (2026-09-10)
 
 * `GET /ops/overview` on every service: health, consumer lag, dead letter depth, breaker states
   and, on the order service, in flight and stuck sagas with the count per state.
@@ -8,7 +30,7 @@
 * A `tight` chaos profile runs the existing harness with six kills and a two second restart, and
   the chaos summary now ends with the overview of all three services.
 
-## v4.0.0
+## v4.0.0 (2026-09-10)
 
 * `POST /orders` accepts an `Idempotency-Key`. The first call stores the answer it returned in the
   same transaction as the order, and a repeat is answered from that store with `Idempotent-Replay`
@@ -19,7 +41,7 @@
   unpublished is recognised as the crash window between the send and the ack, sent again and
   counted in `ledgermesh.outbox.resends`.
 
-## v3.0.0
+## v3.0.0 (2026-09-10)
 
 * Every business topic has a `<topic>.dlq` shadow. A record whose handler keeps failing is retried
   in place with exponential backoff and then dead lettered with its original coordinates and the
@@ -32,7 +54,7 @@
   from broker offsets, and `ledgermesh.consumer.delivery.failures{topic}` counts failed deliveries.
 * The producer refuses to start with settings that would break the relay's delivery guarantees.
 
-## v2.0.0
+## v2.0.0 (2026-09-08)
 
 * Per step saga deadlines on the order row, with a reaper that cancels a reservation that never
   answered, re-drives a silent payment once and then cancels it.
@@ -41,7 +63,7 @@
 * `GET /orders/{id}/timeline` returns every saga step with a timestamp; `deadlineAt` and `redrives`
   appear on the order response.
 
-## v1.0.0
+## v1.0.0 (2026-09-08)
 
 * Order, inventory and payment services on Kafka with a transactional outbox, idempotent consumers
   and a compensating saga.

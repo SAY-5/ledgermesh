@@ -1,0 +1,145 @@
+#!/usr/bin/env node
+// Reads the recorded chaos summaries under chaos/evidence/ and writes
+// src/sim/measured.generated.ts, so every figure the page presents as measured comes from a run
+// that is committed to this repository, together with the raw text it was read from. Standard
+// library only. Usage: node scripts/extract-measured.mjs [--check]
+import { readFileSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const repo = resolve(here, "..", "..");
+const target = resolve(here, "..", "src", "sim", "measured.generated.ts");
+
+// `blobCommit` is the commit that carries the summary, so the page can link to a permalink that
+// resolves on any branch. Re-derive it after recording a run:
+//   git log -1 --format=%H -- chaos/evidence/<label>/summary.txt
+const RUNS = [
+  {
+    key: "baseline",
+    path: "chaos/evidence/baseline/summary.txt",
+    blobCommit: "8a0922c1b86d8b285e7f20433243e7af94a7805b",
+  },
+  {
+    key: "chaos",
+    path: "chaos/evidence/steady/summary.txt",
+    blobCommit: "37414de80a3bdc26bd943c11e6c848241b85a6cd",
+  },
+];
+
+function field(raw, label) {
+  const m = raw.match(new RegExp(`^  ${label}\\s+(.*)$`, "m"));
+  if (!m) throw new Error(`missing "${label}" line`);
+  return m[1].trim();
+}
+
+function int(raw, label, pattern) {
+  const value = field(raw, label);
+  const m = value.match(pattern);
+  if (!m) throw new Error(`cannot read ${label} from "${value}"`);
+  return Number(m[1]);
+}
+
+function probes(raw) {
+  const value = field(raw, "stock probes");
+  const out = {};
+  for (const key of ["live", "cache", "unknown", "error"]) {
+    const m = value.match(new RegExp(`'${key}': (\\d+)`));
+    if (!m) throw new Error(`cannot read probe ${key} from "${value}"`);
+    out[key] = Number(m[1]);
+  }
+  return out;
+}
+
+function kills(raw) {
+  const value = field(raw, "kills");
+  const count = Number(value.match(/^(\d+)/)[1]);
+  const inside = value.match(/\(([^)]*)\)/);
+  const list = [];
+  if (count > 0 && inside) {
+    for (const part of inside[1].split(",")) {
+      const m = part.trim().match(/^(\S+) @(\d+)s$/);
+      if (!m) throw new Error(`cannot read a kill from "${part}"`);
+      list.push({ service: m[1], atSeconds: Number(m[2]) });
+    }
+  }
+  if (list.length !== count) throw new Error(`kill count ${count} does not match "${value}"`);
+  return list;
+}
+
+function parse(raw) {
+  const recorded = field(raw, "recorded");
+  const at = recorded.match(/^(\S+) at commit (\S+)/);
+  if (!at) throw new Error(`cannot read the provenance line "${recorded}"`);
+  if (/with uncommitted changes/.test(recorded)) {
+    throw new Error("recorded from a dirty working tree; re-run the harness on a committed tree");
+  }
+  const latency = field(raw, "saga latency").match(
+    /p50 (\d+) ms\s+p95 (\d+) ms\s+max (\d+) ms/,
+  );
+  if (!latency) throw new Error("cannot read the saga latency line");
+  const retries = field(raw, "retries").match(
+    /with retry (\d+) ok \/ (\d+) exhausted, without retry (\d+) ok \/ (\d+) failed/,
+  );
+  if (!retries) throw new Error("cannot read the retries line");
+  const resubmits = field(raw, "resubmits").match(/^(\d+) retried submits over (\d+) orders/);
+  if (!resubmits) throw new Error("cannot read the resubmits line");
+  const ceiling = raw.match(/^  p95 ceiling\s+(\d+) ms \(CHAOS_MAX_P95\) (\w+)$/m);
+  return {
+    recordedAt: at[1],
+    commit: at[2],
+    host: field(raw, "host"),
+    knobs: field(raw, "knobs"),
+    load: field(raw, "load"),
+    submitted: int(raw, "orders submitted", /^(\d+)$/),
+    confirmed: int(raw, "confirmed", /^(\d+)$/),
+    cancelledStock: int(raw, "cancelled \\(stock\\)", /^(\d+)$/),
+    failedStuck: int(raw, "failed / stuck", /^(\d+)$/),
+    kills: kills(raw),
+    p50Ms: Number(latency[1]),
+    p95Ms: Number(latency[2]),
+    maxMs: Number(latency[3]),
+    p95CeilingMs: ceiling ? Number(ceiling[1]) : null,
+    p95CeilingHeld: ceiling ? ceiling[2] === "held" : null,
+    retriesWithRetry: Number(retries[1]),
+    retriesExhausted: Number(retries[2]),
+    deferred: int(raw, "deferred payments", /^(\d+)$/),
+    duplicates: int(raw, "duplicate events", /^(\d+)/),
+    resubmits: Number(resubmits[1]),
+    retriedOrders: Number(resubmits[2]),
+    probes: probes(raw),
+    breakerTransitions: field(raw, "breaker transitions"),
+    stuckOrders: int(raw, "stuck orders", /^(\d+)$/),
+  };
+}
+
+const runs = {};
+for (const run of RUNS) {
+  const raw = readFileSync(resolve(repo, run.path), "utf8");
+  try {
+    runs[run.key] = { source: run.path, blobCommit: run.blobCommit, ...parse(raw), raw };
+  } catch (err) {
+    throw new Error(`${run.path}: ${err.message}`);
+  }
+}
+
+const header = [
+  "// Written by web/scripts/extract-measured.mjs from the chaos summaries recorded under",
+  "// chaos/evidence/. Do not edit; run `npm run measured` after recording a run. `raw` is the",
+  "// summary text the figures were read from, so a hand written figure can be caught.",
+].join("\n");
+const body = `${header}\nexport const MEASURED = ${JSON.stringify(runs, null, 2)} as const;\n`;
+
+if (process.argv.includes("--check")) {
+  const current = readFileSync(target, "utf8");
+  if (current !== body) {
+    console.error(
+      "src/sim/measured.generated.ts is stale: run `npm run measured` and commit the result",
+    );
+    process.exit(1);
+  }
+  console.log("measured.generated.ts matches the recorded summaries");
+} else {
+  writeFileSync(target, body);
+  console.log(`wrote ${target}`);
+}

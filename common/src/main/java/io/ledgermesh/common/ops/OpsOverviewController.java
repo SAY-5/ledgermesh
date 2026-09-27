@@ -15,10 +15,10 @@ import org.springframework.web.bind.annotation.RestController;
 
 /**
  * One page an operator can read during an incident: whether this service is healthy, how far its
- * listener groups are behind, what is waiting in the dead letter topics, which breakers are open,
- * and, on the order service, how many sagas are still open and how many have missed their deadline.
- * The numbers come from the same gauges the metrics endpoint publishes, so the page and the
- * dashboards cannot disagree.
+ * listener groups are behind, what is waiting in the dead letter topics and what was parked after
+ * its replays ran out, which breakers are open, and, on the order service, how many sagas are still
+ * open and how many have missed their deadline. The numbers come from the same gauges the metrics
+ * endpoint publishes, so the page and the dashboards cannot disagree.
  */
 @RestController
 @RequestMapping("/ops")
@@ -29,6 +29,7 @@ public class OpsOverviewController {
       String health,
       Map<String, Long> consumerLag,
       Map<String, Long> deadLetterDepth,
+      Map<String, Long> parkedDepth,
       Map<String, String> breakers,
       Sagas sagas) {}
 
@@ -60,6 +61,7 @@ public class OpsOverviewController {
         status(),
         metrics == null ? Map.of() : metrics.consumerLag(),
         metrics == null ? Map.of() : metrics.dlqDepth(),
+        metrics == null ? Map.of() : metrics.parkedDepth(),
         breakerStates(),
         saga == null ? null : saga.sagas());
   }

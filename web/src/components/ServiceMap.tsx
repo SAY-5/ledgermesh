@@ -1,4 +1,6 @@
 import { useReducedMotion } from "framer-motion";
+import { useId } from "react";
+import { CONFIG } from "../sim/config.generated.ts";
 import type { ServiceName } from "../sim/events.ts";
 import type { BreakerState } from "../sim/resilience.ts";
 
@@ -65,7 +67,7 @@ const EDGES: Edge[] = [
     id: "topay",
     d: "M 760 152 C 760 220, 760 260, 760 320",
     label: "inventory.reserved",
-    labelAt: [812, 240],
+    labelAt: [640, 240],
     from: "inventory-service",
     to: "payment-service",
     particles: 2,
@@ -96,10 +98,31 @@ const EDGES: Edge[] = [
   },
 ];
 
-const NODES: { name: ServiceName; x: number; y: number; port: number; store: string }[] = [
-  { name: "order-service", x: 50, y: 178, port: 8081, store: "orders + outbox_event" },
-  { name: "inventory-service", x: 660, y: 56, port: 8082, store: "stock_item + outbox_event" },
-  { name: "payment-service", x: 660, y: 320, port: 8083, store: "payment + outbox_event" },
+const NODES: {
+  name: ServiceName;
+  short: string;
+  x: number;
+  y: number;
+  port: number;
+  store: string;
+}[] = [
+  { name: "order-service", short: "order", x: 50, y: 178, port: 8081, store: "orders + outbox_event" },
+  {
+    name: "inventory-service",
+    short: "inventory",
+    x: 660,
+    y: 56,
+    port: 8082,
+    store: "stock_item + outbox_event",
+  },
+  {
+    name: "payment-service",
+    short: "payment",
+    x: 660,
+    y: 320,
+    port: 8083,
+    store: "payment + outbox_event",
+  },
 ];
 
 interface Props {
@@ -109,26 +132,111 @@ interface Props {
   compact?: boolean;
 }
 
+const LAG_LABELS: { key: keyof NonNullable<MapState["lag"]>; topic: string }[] = [
+  { key: "created", topic: "order.created" },
+  { key: "reserved", topic: "inventory.reserved" },
+  { key: "payment", topic: "payment.completed / failed" },
+  { key: "cancelled", topic: "order.cancelled" },
+];
+
+function statusOf(view: ServiceView): "killed" | "booting" | "ready" {
+  return !view.alive ? "killed" : !view.ready ? "booting" : "ready";
+}
+
+/** The same state as the diagram, as a list, for viewports where the diagram would not be legible. */
+function MapStack({ state }: { state: MapState }) {
+  const lag = LAG_LABELS.map((l) => ({ ...l, value: state.lag ? state.lag[l.key] : 0 })).filter(
+    (l) => l.value > 0,
+  );
+  return (
+    <div className="map-stack">
+      <ul className="map-stack-list">
+        {NODES.map((node) => {
+          const view = state.services[node.name];
+          const status = statusOf(view);
+          return (
+            <li key={node.name} className={`map-stack-node is-${status}`}>
+              <p className="map-stack-name mono">
+                <span className="map-stack-led" aria-hidden="true" />
+                {node.name}
+              </p>
+              <p className="map-stack-meta mono">
+                :{node.port} · Postgres · {node.store}
+              </p>
+              <p className="map-stack-status mono">
+                {view.note ??
+                  (status === "killed" ? "SIGKILL" : status === "booting" ? "starting JVM" : "ready")}
+              </p>
+            </li>
+          );
+        })}
+      </ul>
+      <dl className="map-stack-rows mono">
+        {/* the two constants hold whether or not a run is driving this map */}
+        <div>
+          <dt>Redis stock cache</dt>
+          <dd>TTL {CONFIG.cacheTtlMs / 1000} s</dd>
+        </div>
+        <div>
+          <dt>stock check time limit</dt>
+          <dd>{CONFIG.inventoryTimeLimitMs} ms</dd>
+        </div>
+        {/* breaker and lag rows appear only where a run reports them */}
+        {state.breakers ? (
+          <div>
+            <dt>breaker inventory</dt>
+            <dd className={`state-${state.breakers.inventory}`}>{state.breakers.inventory}</dd>
+          </div>
+        ) : null}
+        {state.breakers ? (
+          <div>
+            <dt>breaker processor</dt>
+            <dd className={`state-${state.breakers.processor}`}>{state.breakers.processor}</dd>
+          </div>
+        ) : null}
+        {state.lag && lag.length === 0 ? (
+          <div>
+            <dt>topics</dt>
+            <dd>nothing waiting</dd>
+          </div>
+        ) : null}
+        {lag.map((l) => (
+          <div key={l.key}>
+            <dt>{l.topic}</dt>
+            <dd>{l.value} waiting</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+  );
+}
+
 /**
  * The three services, their topics and the compensation loop as one SVG. Particles ride the edges
  * with SMIL animateMotion; under reduced motion they are drawn as static markers.
  */
 export function ServiceMap({ state = IDLE, className, compact }: Props) {
   const reduced = useReducedMotion();
+  const uid = useId();
+  const titleId = `service-map-title-${uid}`;
+  const descId = `service-map-desc-${uid}`;
   const flow = state.flow ?? 1;
+  // read out with the diagram, and it changes as services are killed and come back
+  const live = NODES.map((n) => `${n.name} ${statusOf(state.services[n.name])}`).join(", ");
   return (
+    <div className={["map-shell", compact ? "map-shell-compact" : ""].join(" ")}>
     <svg
       className={["service-map", compact ? "service-map-compact" : "", className ?? ""].join(" ")}
       viewBox="0 20 960 440"
       role="img"
-      aria-labelledby="service-map-title service-map-desc"
+      aria-labelledby={`${titleId} ${descId}`}
     >
-      <title id="service-map-title">LedgerMesh service map</title>
-      <desc id="service-map-desc">
+      <title id={titleId}>LedgerMesh service map</title>
+      <desc id={descId}>
         order-service publishes order.created to inventory-service, which answers with
         inventory.reserved or inventory.rejected and forwards reservations to payment-service;
         payment-service answers with payment.completed or payment.failed; a declined payment emits
-        order.cancelled back to inventory as compensation.
+        order.cancelled back to inventory as compensation. Now: {live}.
       </desc>
       <defs>
         <linearGradient id="edge-copper" x1="0" x2="1">
@@ -150,7 +258,7 @@ export function ServiceMap({ state = IDLE, className, compact }: Props) {
       <g className="map-broker">
         <rect x="300" y="60" width="330" height="360" rx="26" />
         <text x="465" y="444" textAnchor="middle" className="map-broker-label">
-          Redpanda (Kafka) · 6 topics · 3 partitions · keyed by order id
+          Redpanda (Kafka) · the 6 simulated topics
         </text>
       </g>
 
@@ -215,26 +323,23 @@ export function ServiceMap({ state = IDLE, className, compact }: Props) {
       {/* redis attached to inventory */}
       <g className={`map-redis ${state.services["inventory-service"].ready ? "" : "is-detached"}`}>
         <path d="M 820 152 C 840 190, 860 200, 880 214" className="edge-line redis" />
-        <rect x="868" y="196" width="84" height="64" rx="12" />
-        <text x="910" y="220" textAnchor="middle" className="node-title">
+        <rect x="856" y="196" width="100" height="64" rx="12" />
+        <text x="906" y="224" textAnchor="middle" className="node-title">
           Redis
         </text>
-        <text x="910" y="236" textAnchor="middle" className="node-sub">
+        <text x="906" y="246" textAnchor="middle" className="node-sub">
           stock:{"{sku}"}
-        </text>
-        <text x="910" y="250" textAnchor="middle" className="node-sub">
-          TTL 60 s
         </text>
       </g>
 
       {/* stock check HTTP call */}
       <g className="map-http">
         <path d="M 250 190 C 380 50, 520 30, 660 76" className="edge-line http" />
-        <text x="440" y="36" textAnchor="middle" className="edge-label http">
-          GET /stock/{"{sku}"} · breaker + 800 ms time limit · cache fallback
+        <text x="440" y="34" textAnchor="middle" className="edge-label http">
+          GET /stock/{"{sku}"} · breaker · cache fallback
         </text>
         {state.breakers ? (
-          <text x="440" y="52" textAnchor="middle" className={`edge-breaker state-${state.breakers.inventory}`}>
+          <text x="440" y="54" textAnchor="middle" className={`edge-breaker state-${state.breakers.inventory}`}>
             breaker {state.breakers.inventory}
           </text>
         ) : null}
@@ -247,21 +352,15 @@ export function ServiceMap({ state = IDLE, className, compact }: Props) {
           <g key={node.name} className={`map-node is-${status}`} transform={`translate(${node.x} ${node.y})`}>
             <rect width="200" height="96" rx="18" className="node-body" />
             <rect x="0" y="0" width="200" height="96" rx="18" className="node-halo" />
-            <circle cx="22" cy="24" r="5" className="node-led" />
-            <text x="36" y="29" className="node-title">
-              {node.name}
+            <circle cx="24" cy="30" r="6" className="node-led" />
+            <text x="42" y="38" className="node-title">
+              {node.short}
             </text>
-            <text x="36" y="48" className="node-sub">
-              :{node.port} · Postgres
-            </text>
-            <text x="36" y="64" className="node-sub">
-              {node.store}
-            </text>
-            <text x="36" y="84" className="node-status">
+            <text x="20" y="72" className="node-status">
               {view.note ?? (status === "killed" ? "SIGKILL" : status === "booting" ? "starting JVM" : "ready")}
             </text>
             {node.name === "payment-service" && state.breakers ? (
-              <text x="100" y="114" textAnchor="middle" className={`node-breaker state-${state.breakers.processor}`}>
+              <text x="100" y="122" textAnchor="middle" className={`node-breaker state-${state.breakers.processor}`}>
                 processor {state.breakers.processor}
               </text>
             ) : null}
@@ -269,5 +368,7 @@ export function ServiceMap({ state = IDLE, className, compact }: Props) {
         );
       })}
     </svg>
+    <MapStack state={state} />
+    </div>
   );
 }

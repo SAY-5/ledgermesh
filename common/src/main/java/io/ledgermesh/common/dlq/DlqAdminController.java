@@ -2,6 +2,7 @@ package io.ledgermesh.common.dlq;
 
 import io.ledgermesh.common.events.Topics;
 import io.ledgermesh.common.metrics.KafkaLagMetrics;
+import java.util.List;
 import java.util.Map;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -11,7 +12,10 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-/** Dead letter operations: depth per topic and replay back onto the source topic. */
+/**
+ * Dead letter operations: depth per topic, replay back onto the source topic, and the records that
+ * were parked once their replays ran out.
+ */
 @RestController
 @RequestMapping("/admin/dlq")
 public class DlqAdminController {
@@ -31,6 +35,13 @@ public class DlqAdminController {
   public Map<String, Long> depth() {
     KafkaLagMetrics metrics = lag.getIfAvailable();
     return metrics == null ? Map.of() : metrics.dlqDepth();
+  }
+
+  /** Records parked on {@code <topic>.parked}, per source topic, oldest first. */
+  @GetMapping("/parked")
+  public Map<String, List<DlqReplayer.ParkedRecord>> parked(
+      @RequestParam(defaultValue = "100") int max) {
+    return replayer.parked(max);
   }
 
   @PostMapping("/{topic}/replay")

@@ -27,15 +27,18 @@ import org.springframework.kafka.listener.MessageListenerContainer;
 import org.springframework.scheduling.annotation.Scheduled;
 
 /**
- * Consumer lag for this service's listener groups and dead letter depth per topic, computed from
- * broker offsets on a fixed delay. Lag is end offset minus committed offset summed over partitions;
- * depth is the same difference for the replay group on {@code <topic>.dlq}, so a replayed record
- * leaves the depth. Both are gauges, so a scrape between refreshes sees the last computed value.
+ * Consumer lag for this service's listener groups, dead letter depth and parked depth per topic,
+ * computed from broker offsets on a fixed delay. Lag is end offset minus committed offset summed
+ * over partitions; dead letter depth is the same difference for the replay group on {@code
+ * <topic>.dlq}, so a replayed or parked record leaves the depth; parked depth is every record
+ * retained on {@code <topic>.parked}, which nobody consumes. All three are gauges, so a scrape
+ * between refreshes sees the last computed value.
  */
 public class KafkaLagMetrics implements DisposableBean {
 
   public static final String LAG = "ledgermesh.consumer.lag";
   public static final String DLQ_DEPTH = "ledgermesh.dlq.depth";
+  public static final String PARKED_DEPTH = "ledgermesh.dlq.parked.depth";
 
   private static final Logger log = LoggerFactory.getLogger(KafkaLagMetrics.class);
   private static final long TIMEOUT_SECONDS = 5;
@@ -46,6 +49,7 @@ public class KafkaLagMetrics implements DisposableBean {
   private final String replayGroup;
   private final Map<String, AtomicLong> lag = new ConcurrentHashMap<>();
   private final Map<String, AtomicLong> depth = new ConcurrentHashMap<>();
+  private final Map<String, AtomicLong> parked = new ConcurrentHashMap<>();
 
   public KafkaLagMetrics(
       KafkaAdmin kafkaAdmin,
@@ -104,6 +108,13 @@ public class KafkaLagMetrics implements DisposableBean {
         gauge(depth, topic, DLQ_DEPTH, Tags.of("topic", topic))
             .set(behind(dlqs.get(Topics.dlq(topic)), replayed));
       }
+      Map<String, TopicDescription> parkedTopics =
+          describe(
+              topics.stream().map(Topics::parked).collect(java.util.stream.Collectors.toSet()));
+      for (String topic : topics) {
+        gauge(parked, topic, PARKED_DEPTH, Tags.of("topic", topic))
+            .set(behind(parkedTopics.get(Topics.parked(topic)), Map.of()));
+      }
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       throw new IllegalStateException("interrupted while reading offsets", e);
@@ -116,6 +127,13 @@ public class KafkaLagMetrics implements DisposableBean {
   public Map<String, Long> dlqDepth() {
     Map<String, Long> out = new TreeMap<>();
     depth.forEach((topic, value) -> out.put(topic, value.get()));
+    return out;
+  }
+
+  /** Records parked per source topic from the last refresh, sorted by topic. */
+  public Map<String, Long> parkedDepth() {
+    Map<String, Long> out = new TreeMap<>();
+    parked.forEach((topic, value) -> out.put(topic, value.get()));
     return out;
   }
 

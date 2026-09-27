@@ -45,6 +45,19 @@ public final class Stack {
   static final int DLQ_ATTEMPTS = 3;
   static final int DLQ_MAX_REPLAYS = 1;
 
+  /**
+   * The three services share one classpath in this JVM, so the Redis starter that only the
+   * inventory service declares would also auto-configure a Redis client, and a Redis health check,
+   * in the order and payment contexts. Their images never carry Redis; keeping it out of their
+   * contexts here keeps the health they report independent of whatever answers on the host's port
+   * 6379.
+   */
+  static final String NO_REDIS =
+      "spring.autoconfigure.exclude="
+          + "org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration,"
+          + "org.springframework.boot.autoconfigure.data.redis.RedisReactiveAutoConfiguration,"
+          + "org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration";
+
   static final ObjectMapper JSON = new ObjectMapper();
   static final HttpClient HTTP = HttpClient.newHttpClient();
 
@@ -99,7 +112,7 @@ public final class Stack {
   }
 
   static ConfigurableApplicationContext bootPayment() {
-    return boot(PaymentServiceApplication.class, "payments", paymentPort);
+    return boot(PaymentServiceApplication.class, "payments", paymentPort, NO_REDIS);
   }
 
   static ConfigurableApplicationContext bootOrder() {
@@ -107,6 +120,7 @@ public final class Stack {
         OrderServiceApplication.class,
         "orders",
         orderPort,
+        NO_REDIS,
         "ledgermesh.inventory.url=http://localhost:" + inventoryPort);
   }
 

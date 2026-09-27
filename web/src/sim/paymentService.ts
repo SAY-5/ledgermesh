@@ -1,4 +1,5 @@
 import type { BusRecord } from "./broker.ts";
+import { CONFIG } from "./config.generated.ts";
 import {
   Topics,
   type InventoryReserved,
@@ -35,20 +36,14 @@ export interface ProcessorConfig {
   slowMillis: number;
 }
 
-export const PROCESSOR_BREAKER: BreakerConfig = {
-  slidingWindowSize: 20,
-  minimumNumberOfCalls: 10,
-  failureRateThreshold: 60,
-  waitDurationInOpenStateMs: 5000,
-  permittedNumberOfCallsInHalfOpenState: 3,
-};
+export const PROCESSOR_BREAKER: BreakerConfig = CONFIG.processorBreaker;
 
-const MAX_ATTEMPTS = 3;
-const RETRY_WAIT_MS = 200;
-const TIME_LIMIT_MS = 1000;
-const SWEEP_MS = 1000;
-const SWEEP_GRACE_MS = 3000;
-const RETRY_DELAY_MS = 2000;
+const MAX_ATTEMPTS = CONFIG.processorRetry.maxAttempts;
+const RETRY_WAIT_MS = CONFIG.processorRetry.waitDurationMs;
+const TIME_LIMIT_MS = CONFIG.processorTimeLimitMs;
+const SWEEP_MS = CONFIG.payment.sweepMs;
+const SWEEP_GRACE_MS = CONFIG.payment.sweepGraceMs;
+const RETRY_DELAY_MS = CONFIG.payment.retryDelayMs;
 
 type Result =
   | { kind: "approved"; code: string; latency: number }
@@ -84,7 +79,6 @@ export class PaymentService extends Service {
   readonly breaker = new CircuitBreaker("processor", PROCESSOR_BREAKER);
   readonly retries: RetryCounters = emptyRetryCounters();
   deferred = 0;
-  outcomes = { AUTHORIZED: 0, DECLINED: 0, DEFERRED: 0 };
   private calls: Call[] = [];
   private lastSweep = -Infinity;
 
@@ -115,7 +109,7 @@ export class PaymentService extends Service {
         t: now,
         source: "payment-service",
         kind: "record",
-        text: `INSERT payment (NEW, ${event.amount.toFixed(2)}, next_attempt_at +3 s); INSERT processed_event; COMMIT`,
+        text: `INSERT payment (NEW, ${event.amount.toFixed(2)}, next_attempt_at +${SWEEP_GRACE_MS / 1000} s); INSERT processed_event; COMMIT`,
         orderId: event.orderId,
       });
     }
@@ -188,12 +182,14 @@ export class PaymentService extends Service {
       // transient fault or time limiter timeout: counted by the breaker, retried with a pause
       this.breaker.onError(now);
       const error =
-        result.kind === "slow" ? "TimeoutException (1 s time limit)" : "ProcessorUnavailableException";
+        result.kind === "slow"
+          ? `TimeoutException (${TIME_LIMIT_MS / 1000} s time limit)`
+          : "ProcessorUnavailableException";
       this.env.trace?.({
         t: now,
         source: "payment-service",
         kind: "retry",
-        text: `attempt ${call.attempts} failed: ${error}${call.attempts < MAX_ATTEMPTS ? ", retrying in 200 ms" : ", retries exhausted"}`,
+        text: `attempt ${call.attempts} failed: ${error}${call.attempts < MAX_ATTEMPTS ? `, retrying in ${RETRY_WAIT_MS} ms` : ", retries exhausted"}`,
         orderId: call.orderId,
       });
       if (call.attempts < MAX_ATTEMPTS) {
@@ -329,7 +325,6 @@ export class PaymentService extends Service {
         break;
       }
     }
-    this.outcomes[payment.status as keyof typeof this.outcomes]++;
   }
 
   /** Attempts every open payment whose retry time has come, oldest first, up to 100. */

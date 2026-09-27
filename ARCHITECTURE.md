@@ -94,13 +94,17 @@ decoded is not worth retrying at all and goes straight to the dead letter topic.
 
 Replay is a deliberate operator action. `POST /admin/dlq/{topic}/replay` consumes the dead letter
 topic with a group of its own, republishes each record on the source topic with its original key,
-value and business headers, and commits afterwards, so an interrupted replay repeats rather than
-loses. The consumers that had already applied the event drop the replay on the event id, exactly as
-they drop any other redelivery.
+value and business headers, and commits only the offsets of the records it republished or parked,
+so an interrupted replay repeats rather than loses and a batch cut short by `max` leaves the rest
+for the next call. The consumers that had already applied the event drop the replay on the event
+id, exactly as they drop any other redelivery.
 
 A record that fails, is replayed and fails again would cycle for ever. Every replay stamps
 `dlq-replay-count`; when it reaches `ledgermesh.dlq.max-replays` the replayer parks the record
-instead of republishing it, and the operator sees a parked count instead of a growing loop.
+instead of republishing it: the record is copied to `<topic>.parked` with every header it carried
+(the replay count, the original topic, partition and offset, the exception) before the replay group
+commits, so it leaves the dead letter depth without leaving view. `GET /admin/dlq/parked` lists
+what is parked per topic and `ledgermesh.dlq.parked.depth` counts it.
 
 Lag is measured from the broker rather than from the consumer, so it is still readable while a
 service is down: for each listener group, the end offset of every partition minus the committed
@@ -138,7 +142,8 @@ state clears it.
 `StuckOrderReaper` polls `status in (PENDING, RESERVED) and deadlineAt <= now` on a fixed delay.
 A silent reservation is cancelled through the state machine, which also emits `order.cancelled`:
 if inventory did reserve but its notice never applied, the release makes the stock whole; if it
-never reserved, the release is a no-op. A silent payment is first re-driven: `order.payment_requested`
+never reserved, the release is a no-op that leaves a released marker, and the reservation ledger
+described below rejects the `order.created` if it turns up later. A silent payment is first re-driven: `order.payment_requested`
 goes to the payment service, which either re-emits `payment.completed` / `payment.failed` under a
 fresh event id (the first copy evidently never applied) or attempts the payment now (recording it
 from the request when it was never seen). Only a second expiry cancels with `PAYMENT_TIMEOUT`. A
@@ -154,6 +159,15 @@ and the state change commit together, the timeline is exact across restarts and 
 A multi-line order is reserved all or nothing: the rows are locked in sku order (`PESSIMISTIC_WRITE`,
 sorted to avoid deadlocks), every line is checked, then every line is decremented. Concurrent
 reservations for the last unit serialize on the lock and exactly one wins.
+
+Every hold is recorded in a `reservation` table, one row per order and sku, in the same transaction
+as the decrement. A release credits the quantities on those rows and flips them to released, so an
+`order.cancelled` whose lines disagree with what was reserved cannot oversell or leak units; a
+release for an order without rows writes released markers with quantity zero, and a reservation
+for an order that already has released rows is rejected with `ALREADY_RELEASED`. The two inbound
+topics are consumed by independent listener containers, so this is what makes their relative order
+irrelevant; a reservation delivered again under a fresh event id (a replayed dead letter) finds its
+own rows and takes nothing twice.
 
 Redis holds `stock:{sku}` with a TTL. Writes are write-through but deferred to `afterCommit`, so
 the cache never shows a value that was rolled back; the TTL bounds the damage of a missed write.
@@ -231,9 +245,12 @@ meters:
 | `ledgermesh.consumer.lag{group,topic}` | all | end offset minus committed offset |
 | `ledgermesh.dlq.depth{topic}` | all | dead letters waiting for a replay decision |
 | `ledgermesh.dlq.published{topic}`, `.replayed`, `.parked` | all | dead letter traffic |
+| `ledgermesh.dlq.parked.depth{topic}` | all | records retained on `<topic>.parked` |
 | `ledgermesh.breaker.transitions{name,from,to}` | all | breaker history |
 | `ledgermesh.payments.by_state`, `.deferred`, `.outcomes` | payment | deferred queue |
 | `ledgermesh.cache.reads{result}` | inventory | cache hit ratio |
+| `ledgermesh.inventory.reservations{result}` | inventory | reservations reserved or rejected |
+| `ledgermesh.inventory.releases{result}` | inventory | compensations that released units, or found nothing to release |
 | `resilience4j.retry.calls{kind}` | payment | retries |
 
 A correlation id is minted per HTTP request, carried in Kafka headers and event payloads, and

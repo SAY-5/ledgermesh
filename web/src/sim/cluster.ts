@@ -1,5 +1,6 @@
 import { Broker } from "./broker.ts";
 import { StockCache } from "./cache.ts";
+import { CONFIG } from "./config.generated.ts";
 import type { ServiceName, Topic, Trace } from "./events.ts";
 import { InventoryService } from "./inventoryService.ts";
 import { OrderService, type Order, type OrderItem, type StockView } from "./orderService.ts";
@@ -37,12 +38,7 @@ export interface StockProbes {
   error: number;
 }
 
-export const DEFAULT_STOCK: Record<string, number> = {
-  "SKU-ALPHA": 100000,
-  "SKU-BRAVO": 100000,
-  "SKU-CHARLIE": 100000,
-  "SKU-SCARCE": 40,
-};
+export const DEFAULT_STOCK: Record<string, number> = { ...CONFIG.stockSeed };
 
 /**
  * The whole stack in one object: the broker, Redis, the three services and a virtual clock. Time
@@ -77,21 +73,18 @@ export class Cluster {
       { deliveryMs: options.deliveryMs ?? 60, redeliverChance: options.redeliverChance ?? 0.0008 },
       trace,
     );
-    this.redis = new StockCache(60_000, trace);
+    this.redis = new StockCache(CONFIG.cacheTtlMs, trace);
     const env = {
       broker: this.broker,
       trace,
-      outboxPollMs: 200,
+      outboxPollMs: CONFIG.outboxPollMs,
       bootMs: options.bootMs ?? 2500,
       consumerConcurrency: 3,
     };
     this.inventory = new InventoryService(env, new Prng(options.seed + 1), this.redis);
     this.order = new OrderService(env, new Prng(options.seed + 2), () => this.inventory);
     this.payment = new PaymentService(env, new Prng(options.seed + 3), {
-      limit: 10000,
-      transientPercent: 5,
-      slowPercent: 1,
-      slowMillis: 3000,
+      ...CONFIG.processor,
       ...options.processor,
     });
     this.inventory.seed(options.stockSeed ?? DEFAULT_STOCK, 0);
@@ -239,6 +232,8 @@ export class Cluster {
         this.inventory.idempotent.duplicates +
         this.payment.idempotent.duplicates,
       releases: this.inventory.releases,
+      restarts: this.order.restarts + this.inventory.restarts + this.payment.restarts,
+      redeliveries: this.broker.redeliveries,
       stockProbes: { ...this.stockProbes },
       p50: percentile(latencies, 50),
       p95: percentile(latencies, 95),
@@ -289,6 +284,10 @@ export interface ClusterStats {
   deferred: number;
   duplicates: number;
   releases: number;
+  /** services brought back after a kill */
+  restarts: number;
+  /** records the broker handed out a second time */
+  redeliveries: number;
   stockProbes: StockProbes;
   p50: number;
   p95: number;
@@ -308,7 +307,10 @@ export function percentile(values: number[], p: number): number {
   return ordered[lo] + (ordered[hi] - ordered[lo]) * (k - lo);
 }
 
-/** The chaos script's summary block, line for line. */
+/**
+ * The counter lines of the chaos script's summary block. The provenance header, the compensation
+ * and resubmit lines and the overview lines that report.py appends have no counterpart here.
+ */
 export function formatSummary(stats: ClusterStats, durationS: number, rate: number): string {
   const timeline = stats.kills.map((k) => `${k.service} @${Math.round(k.at / 1000)}s`).join(", ");
   const r = stats.retries;

@@ -32,7 +32,7 @@ export class Broker {
   private committed = new Map<string, number>();
   private nextOffsets = new Map<Topic, number>();
   private pendingRedelivery = new Map<string, BusRecord>();
-  published = 0;
+  /** records handed out a second time, by chance or on request */
   redeliveries = 0;
 
   constructor(
@@ -57,7 +57,6 @@ export class Broker {
       appendedAt: now,
     };
     log.push(record);
-    this.published++;
     return record;
   }
 

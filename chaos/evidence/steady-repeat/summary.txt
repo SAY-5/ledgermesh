@@ -1,0 +1,26 @@
+LedgerMesh chaos summary
+  recorded             2026-09-27T04:08:15Z at commit d24a5a9
+  host                 Darwin 25.0.0 arm64, 10 cpu, 16.0 GiB; Docker server 29.2.1 (colima); Python 3.14.4
+  knobs                CHAOS_PROFILE=steady CHAOS_DURATION=60 CHAOS_RATE=20 CHAOS_KILLS=3 CHAOS_RESTART_AFTER=5 CHAOS_VICTIMS=inventory-service payment-service order-service CHAOS_SEED=3 CHAOS_DRAIN_TIMEOUT=180 CHAOS_DRAIN_CAP=600 CHAOS_MAX_P95=90000
+  load                 60s at 20 orders/s, seed 3
+  orders submitted     1200
+  confirmed            1148
+  cancelled (stock)    52
+  failed / stuck       0
+  kills                3  (inventory-service @16s, order-service @33s, payment-service @49s)
+  saga latency         p50 17039 ms   p95 30649 ms   max 35142 ms
+  p95 ceiling          90000 ms (CHAOS_MAX_P95) held
+  breaker transitions  order-service/inventory CLOSED->OPEN x1; order-service/inventory HALF_OPEN->OPEN x2; order-service/inventory OPEN->HALF_OPEN x2
+  retries              with retry 78 ok / 0 exhausted, without retry 1052 ok / 0 failed
+  deferred payments    0
+  duplicate events     4 ignored by idempotent consumers
+  compensations        0 reservations released, 0 releases for orders that held nothing
+  resubmits            1957 retried submits over 271 orders, 0 answered from the idempotency store (0 replays counted by the service), 0 gave up, 0 duplicate orders
+  stock probes         {'live': 52, 'cache': 27, 'unknown': 0, 'error': 27}
+  services             order-service UP, inventory-service UP, payment-service UP
+  consumer lag         worst 0 on order-service|inventory.rejected
+  dead letter depth    worst 0 on order-service inventory.rejected
+  parked records       worst 0 on order-service inventory.rejected
+  breaker states       inventory-service/redis CLOSED; order-service/inventory CLOSED; payment-service/processor CLOSED
+  in flight sagas      0
+  stuck orders         0

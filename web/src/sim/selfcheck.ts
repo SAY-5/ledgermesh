@@ -2,6 +2,14 @@
 import { Cluster, formatSummary } from "./cluster.ts";
 import { Topics } from "./events.ts";
 import { LoadGenerator, planKills } from "./loadgen.ts";
+import {
+  BASELINE_RUN,
+  CHAOS_RUN,
+  allFigures,
+  counterFigures,
+  headlineFigures,
+  tokenInSummary,
+} from "./measured.ts";
 
 let failures = 0;
 
@@ -119,6 +127,47 @@ function assert(cond: boolean, msg: string): void {
     return formatSummary(c.stats(), 5, 20);
   };
   assert(run() === run(), "same seed, same summary");
+}
+
+// 6. every figure the page presents as measured is in the recorded summary it claims to come from
+{
+  const figures = allFigures();
+  assert(figures.length > 0, "the recorded runs produced figures to check");
+  for (const { run, figure } of figures) {
+    const missing = figure.tokens.filter((token) => !tokenInSummary(run, token));
+    assert(
+      missing.length === 0,
+      missing.length === 0
+        ? `${run.source}: "${figure.label}" renders ${figure.text}, all of it recorded`
+        : `${run.source}: "${figure.label}" renders ${figure.text}, not in the summary: ${missing.join(", ")}`,
+    );
+  }
+  assert(
+    headlineFigures(CHAOS_RUN).every((f) => f.tokens.length === 1),
+    "each hero figure renders exactly one recorded number",
+  );
+  for (const run of [CHAOS_RUN, BASELINE_RUN]) {
+    assert(
+      run.failedStuck === 0 && run.stuckOrders === 0,
+      `${run.source}: the recorded run ended with no failed or stuck order`,
+    );
+    assert(
+      /^\d{4}-\d{2}-\d{2}T/.test(run.recordedAt) && /^[0-9a-f]{7,40}$/.test(run.commit),
+      `${run.source}: carries a date and the commit it was recorded at (${run.recordedAt}, ${run.commit})`,
+    );
+  }
+  assert(
+    CHAOS_RUN.kills.length === 3 && CHAOS_RUN.kills.some((k) => k.service === "order-service"),
+    `the recorded chaos run killed three services including the order service (${CHAOS_RUN.kills.map((k) => k.service).join(", ")})`,
+  );
+  assert(
+    BASELINE_RUN.kills.length === 0,
+    `the recorded baseline killed nothing (${BASELINE_RUN.kills.length})`,
+  );
+  assert(
+    counterFigures(CHAOS_RUN).some((f) => f.label === "failed / stuck" && f.text === "0"),
+    "the counter the page leans on is measured at zero",
+  );
 }
 
 if (failures > 0) throw new Error(`${failures} self-check(s) failed`);
