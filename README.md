@@ -401,6 +401,6 @@ inventory-service/  reservations, Redis cache, stock API
 payment-service/    authorizer, deferred queue, synthetic processor
 e2e-tests/          Testcontainers integration tests
 deploy/             docker-compose.yml (Redpanda, Redis, Postgres, three services)
-chaos/              run.sh, loadgen.py, report.py, evidence/ (recorded summaries)
+chaos/              run.sh, loadgen.py, report.py, readme_section.py, evidence/ (summaries)
 web/                browser demo: a TypeScript simulation of the v1 mechanisms (see web/README.md)
 ```
