@@ -43,6 +43,9 @@ jobs:
   chaos:
     needs: test
     runs-on: ubuntu-latest
+    env:
+      # a ceiling, not an expected value: see the chaos section of the README
+      CHAOS_MAX_P95: "90000"
     steps:
       - uses: actions/checkout@v4
       - run: make chaos
@@ -51,3 +54,22 @@ jobs:
         with:
           name: chaos-report
           path: chaos/out/
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      # the generated files must still match the services' configuration and the recorded runs
+      - run: npm run config:check
+      - run: npm run measured:check
+      - run: npm run build
+      - run: npm run selfcheck
