@@ -5,12 +5,18 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Clock;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -65,5 +71,44 @@ class IdempotentConsumerTest {
 
     assertThat(consumer.once("payment", "evt-3", runs::incrementAndGet)).isTrue();
     assertThat(runs.get()).isEqualTo(2);
+  }
+
+  @Test
+  void aDeliveryThatMarksTheEventAfterAnotherCommittedItFailsSoItsWorkRollsBack()
+      throws Exception {
+    CountDownLatch checked = new CountDownLatch(1);
+    CountDownLatch firstCommitted = new CountDownLatch(1);
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    try {
+      // found no marker, then held in its work until the other delivery committed
+      Future<Boolean> late =
+          pool.submit(
+              () ->
+                  consumer.once(
+                      "inventory",
+                      "evt-4",
+                      () -> {
+                        checked.countDown();
+                        waitFor(firstCommitted);
+                      }));
+      assertThat(checked.await(10, TimeUnit.SECONDS)).isTrue();
+      assertThat(consumer.once("inventory", "evt-4", () -> {})).isTrue();
+      firstCommitted.countDown();
+
+      assertThatThrownBy(() -> late.get(10, TimeUnit.SECONDS))
+          .hasCauseInstanceOf(DataIntegrityViolationException.class);
+      assertThat(consumer.once("inventory", "evt-4", () -> {})).isFalse();
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  private static void waitFor(CountDownLatch latch) {
+    try {
+      assertThat(latch.await(10, TimeUnit.SECONDS)).isTrue();
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new IllegalStateException(e);
+    }
   }
 }
