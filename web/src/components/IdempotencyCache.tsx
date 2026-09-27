@@ -1,5 +1,6 @@
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useCallback, useRef } from "react";
+import { useOnScreen } from "../hooks/useOnScreen.ts";
 import { useRunner } from "../hooks/useRunner.ts";
 import { Cluster } from "../sim/cluster.ts";
 import { Topics } from "../sim/events.ts";
@@ -43,10 +44,19 @@ const BREAKER_STATES: { id: BreakerState; blurb: string }[] = [
 
 export function IdempotencyCache() {
   const reduced = useReducedMotion();
+  // both panels step only while the section is on screen, and they wait for a click when the
+  // visitor asked for reduced motion
+  const sectionRef = useRef<HTMLDivElement>(null);
+  const onScreen = useOnScreen(sectionRef);
 
   // panel A: duplicates
   const dupFactory = useCallback(buildDuplicates, []);
-  const dup = useRunner(dupFactory, { speed: 1, autoStart: true, frameMs: 120 });
+  const dup = useRunner(dupFactory, {
+    speed: 1,
+    autoStart: !reduced,
+    enabled: onScreen,
+    frameMs: 120,
+  });
   const dupCluster = dup.cluster;
   const stock = dupCluster.inventory.stock.get(SKU)?.available ?? 0;
   const deliveries = dupCluster.traces.filter(
@@ -63,7 +73,8 @@ export function IdempotencyCache() {
   }, []);
   const brk = useRunner(brkFactory, {
     speed: 1,
-    autoStart: true,
+    autoStart: !reduced,
+    enabled: onScreen,
     frameMs: 100,
     onStep: (c) => {
       if (c.now >= nextProbe.current) {
@@ -88,7 +99,7 @@ export function IdempotencyCache() {
 
   return (
     <section className="section" id="idempotency" aria-labelledby="idem-title">
-      <div className="wrap">
+      <div className="wrap" ref={sectionRef}>
         <div className="section-head">
           <span className="section-index">02 · idempotency + cache</span>
           <h2 className="section-title" id="idem-title">
@@ -125,6 +136,14 @@ export function IdempotencyCache() {
                 onClick={() => dupCluster.injectDuplicate(Topics.ORDER_CREATED, "inventory-service")}
               >
                 Redeliver last order.created
+              </button>
+              <button
+                type="button"
+                className="btn"
+                aria-pressed={dup.running}
+                onClick={() => (dup.running ? dup.pause() : dup.start())}
+              >
+                {dup.running ? "Pause" : "Play"}
               </button>
               <button type="button" className="btn" onClick={() => dup.reset()}>
                 Reset
@@ -187,6 +206,14 @@ export function IdempotencyCache() {
                 onClick={() => brkCluster.kill("inventory-service", 5000)}
               >
                 Kill inventory-service (restart in 5 s)
+              </button>
+              <button
+                type="button"
+                className="btn"
+                aria-pressed={brk.running}
+                onClick={() => (brk.running ? brk.pause() : brk.start())}
+              >
+                {brk.running ? "Pause" : "Play"}
               </button>
               <button type="button" className="btn" onClick={() => brk.reset()}>
                 Reset

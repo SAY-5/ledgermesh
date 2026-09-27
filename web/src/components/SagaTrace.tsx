@@ -61,8 +61,8 @@ export function SagaTrace() {
   }, [mode, reset]);
 
   useEffect(() => {
-    if (!running && cluster.now === 0) start();
-  }, [cluster, running, start]);
+    if (!reduced && !running && cluster.now === 0) start();
+  }, [cluster, reduced, running, start]);
 
   const order = cluster.order.find(cluster.submitted[0]);
   const traces = cluster.traces;
@@ -119,11 +119,19 @@ export function SagaTrace() {
               <span className="saga-hint mono">{m.hint}</span>
             </button>
           ))}
+          <button
+            type="button"
+            className="btn"
+            aria-pressed={running}
+            onClick={() => (running ? runner.pause() : start())}
+          >
+            {running ? "Pause" : "Play"}
+          </button>
           <button type="button" className="btn" onClick={() => reset()}>
             Replay
           </button>
           <span className="saga-clock mono" aria-live="off">
-            t = {(cluster.now / 1000).toFixed(2)} s · slow motion
+            t = {(cluster.now / 1000).toFixed(2)} s · virtual clock, slowed down
           </span>
         </div>
 
@@ -208,7 +216,7 @@ export function SagaTrace() {
             ))}
           </div>
 
-          <div className="glass saga-ledger" aria-live="polite" aria-label="Trace" ref={ledgerRef}>
+          <div className="glass saga-ledger" role="log" aria-live="off" aria-label="Trace" ref={ledgerRef}>
             <ol className="ledger">
               <AnimatePresence initial={false}>
                 {traces.map((t: Trace, i: number) => (

@@ -1,9 +1,20 @@
+.map-shell {
+  width: 100%;
+}
+
 .service-map {
   width: 100%;
   height: auto;
   display: block;
   font-family: var(--font-mono);
   overflow: visible;
+}
+
+/* the diagram is sized in user units, so its small print lives here, at body size, at every width */
+.map-stack {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
 }
 
 .map-broker rect {
@@ -13,7 +24,7 @@
 }
 
 .map-broker-label {
-  font-size: 11px;
+  font-size: 16px;
   letter-spacing: 0.12em;
   fill: var(--slate);
   text-transform: uppercase;
@@ -41,24 +52,24 @@
 }
 
 .edge-label {
-  font-size: 11px;
+  font-size: 16px;
   fill: var(--text-dim);
   letter-spacing: 0.02em;
 }
 
 .edge-label.http {
   fill: rgba(127, 168, 217, 0.8);
-  font-size: 10.5px;
+  font-size: 16px;
 }
 
 .edge-lag {
-  font-size: 10.5px;
+  font-size: 16px;
   fill: var(--warn);
 }
 
 .edge-breaker,
 .node-breaker {
-  font-size: 10.5px;
+  font-size: 16px;
   letter-spacing: 0.08em;
   fill: var(--ok);
 }
@@ -125,7 +136,7 @@
 }
 
 .map-node .node-title {
-  font-size: 14px;
+  font-size: 22px;
   font-weight: 700;
   fill: var(--text);
   font-family: var(--font-body);
@@ -133,12 +144,12 @@
 
 .map-node .node-sub,
 .map-redis .node-sub {
-  font-size: 10.5px;
+  font-size: 16px;
   fill: var(--text-dim);
 }
 
 .map-node .node-status {
-  font-size: 11px;
+  font-size: 16px;
   fill: var(--ok);
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -158,7 +169,7 @@
 }
 
 .map-redis .node-title {
-  font-size: 13px;
+  font-size: 20px;
   font-weight: 700;
   fill: var(--slate-bright);
   font-family: var(--font-body);
@@ -175,5 +186,120 @@
   }
   50% {
     opacity: 0.35;
+  }
+}
+
+@media (max-width: 700px) {
+  .service-map {
+    display: none;
+  }
+}
+
+.map-stack-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.map-stack-node {
+  padding: 10px 12px;
+  border: 1px solid var(--rule);
+  border-left: 2px solid var(--slate-deep);
+  border-radius: var(--radius-s);
+  background: var(--ink-2);
+}
+
+.map-stack-node.is-killed {
+  border-left-color: var(--bad);
+}
+
+.map-stack-node.is-booting {
+  border-left-color: var(--warn);
+}
+
+.map-stack-node.is-ready {
+  border-left-color: var(--ok);
+}
+
+.map-stack-node p {
+  margin: 0;
+}
+
+.map-stack-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.map-stack-led {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ok);
+  flex: 0 0 auto;
+}
+
+.map-stack-node.is-killed .map-stack-led {
+  background: var(--bad);
+}
+
+.map-stack-node.is-booting .map-stack-led {
+  background: var(--warn);
+}
+
+.map-stack-meta,
+.map-stack-status {
+  margin-top: 3px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.map-stack-status {
+  color: var(--slate);
+}
+
+.map-stack-rows {
+  margin: 0;
+  display: grid;
+  gap: 6px;
+  font-size: 11.5px;
+}
+
+.map-stack-rows > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.map-stack-rows dt {
+  color: var(--text-dim);
+}
+
+.map-stack-rows dd {
+  margin: 0;
+  color: var(--text);
+}
+
+.map-stack-list {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.map-stack-rows {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 18px;
+}
+
+@media (max-width: 700px) {
+  .map-stack-list,
+  .map-stack-rows {
+    grid-template-columns: 1fr;
   }
 }
