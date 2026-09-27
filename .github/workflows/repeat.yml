@@ -4,6 +4,8 @@ name: repeat
 # and counts the runs it failed. It tells an intermittent failure from a one off, and shows whether
 # a fix holds. Start it from the Actions tab or with
 #   gh workflow run repeat.yml --ref <branch> -f test=ExactlyOnceIT -f runs=50
+# A pull request that changes the exactly once code, or this workflow, gets 50 runs of
+# ExactlyOnceIT before it merges, because a race in that code fails only some of them.
 on:
   workflow_dispatch:
     inputs:
@@ -13,6 +15,16 @@ on:
       runs:
         description: "total runs, dealt out over five runners"
         default: "50"
+  pull_request:
+    paths:
+      - .github/workflows/repeat.yml
+      - common/src/main/java/io/ledgermesh/common/idempotency/**
+      - order-service/src/main/java/io/ledgermesh/order/api/OrderController.java
+      - e2e-tests/src/test/java/io/ledgermesh/e2e/ExactlyOnceIT.java
+
+concurrency:
+  group: repeat-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   repeat:
@@ -22,8 +34,8 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5]
     env:
-      TEST: ${{ inputs.test }}
-      RUNS: ${{ inputs.runs }}
+      TEST: ${{ inputs.test || 'ExactlyOnceIT' }}
+      RUNS: ${{ inputs.runs || '50' }}
       SHARD: ${{ matrix.shard }}
     steps:
       - uses: actions/checkout@v4
@@ -63,8 +75,8 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     env:
-      TEST: ${{ inputs.test }}
-      RUNS: ${{ inputs.runs }}
+      TEST: ${{ inputs.test || 'ExactlyOnceIT' }}
+      RUNS: ${{ inputs.runs || '50' }}
     steps:
       - uses: actions/download-artifact@v4
         with:
