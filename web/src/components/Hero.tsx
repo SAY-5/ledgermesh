@@ -1,16 +1,22 @@
 import { motion, useReducedMotion } from "framer-motion";
+import { CHAOS_RUN, headlineFigures, killTimeline, provenance } from "../sim/measured.ts";
 import { Counter } from "./Counter.tsx";
 import { ServiceMap } from "./ServiceMap.tsx";
 
 const REPO = "https://github.com/SAY-5/ledgermesh";
 
-const STATS = [
-  { label: "orders submitted", value: 1200, tone: "" },
-  { label: "confirmed", value: 1162, tone: "" },
-  { label: "cancelled, out of stock", value: 38, tone: "" },
-  { label: "failed / stuck", value: 0, tone: "is-zero" },
-  { label: "kills under load", value: 3, tone: "is-copper" },
-];
+const TONES: Record<string, string> = {
+  "failed / stuck": "is-zero",
+  "kills under load": "is-copper",
+};
+
+// Read from chaos/evidence/steady/summary.txt through src/sim/measured.generated.ts, so the hero
+// cannot state a figure the recorded run does not contain.
+const STATS = headlineFigures(CHAOS_RUN).map((figure) => ({
+  label: figure.label,
+  value: figure.tokens[0],
+  tone: TONES[figure.label] ?? "",
+}));
 
 export function Hero() {
   const reduced = useReducedMotion();
@@ -69,9 +75,15 @@ export function Hero() {
             </div>
           ))}
           <p className="hero-stats-note">
-            Measured run recorded in the repository: 60 s at 20 orders/s, inventory killed at 22 s
-            and 56 s, payment at 40 s, each restarted after 5 s. 40 stock probes were served from
-            cache while inventory was down; 1 duplicate delivery was ignored.
+            <strong className="hero-stats-tag">measured</strong> {CHAOS_RUN.load}, kills{" "}
+            {killTimeline(CHAOS_RUN)}. Stock probes {CHAOS_RUN.probes.live} live,{" "}
+            {CHAOS_RUN.probes.cache} from cache, {CHAOS_RUN.probes.error} refused while a service was
+            down; {CHAOS_RUN.resubmits} submits retried on their idempotency key over{" "}
+            {CHAOS_RUN.retriedOrders} orders. {provenance(CHAOS_RUN)}. Read from{" "}
+            <a href={`${REPO}/blob/main/${CHAOS_RUN.source}`} target="_blank" rel="noreferrer">
+              {CHAOS_RUN.source}
+            </a>
+            ; every figure below this line is simulated in the browser on a virtual clock.
           </p>
         </motion.dl>
       </div>

@@ -4,6 +4,7 @@ import { useRunner } from "../hooks/useRunner.ts";
 import { Cluster, formatSummary } from "../sim/cluster.ts";
 import type { ServiceName, Trace } from "../sim/events.ts";
 import { LoadGenerator, planKills, type KillPlan } from "../sim/loadgen.ts";
+import { CHAOS_RUN, counterFigures, killTimeline, provenance } from "../sim/measured.ts";
 import { ServiceMap, type MapState } from "./ServiceMap.tsx";
 
 const DURATION_MS = 60_000;
@@ -11,6 +12,8 @@ const RATE = 20;
 const KILLS = 3;
 const SEED = 7;
 const NOTABLE = new Set(["kill", "restart", "breaker", "duplicate", "deferred", "sweep", "redelivery", "inject"]);
+// the recorded run each simulated counter is shown against, keyed by the counter's label
+const MEASURED = new Map(counterFigures(CHAOS_RUN).map((f) => [f.label, f.text]));
 
 interface Session {
   cluster: Cluster;
@@ -220,7 +223,7 @@ export function ChaosRun() {
                 {phase === "idle"
                   ? "ready"
                   : phase === "running"
-                    ? `load · t+${elapsed.toFixed(1)} s`
+                    ? `load · virtual t+${elapsed.toFixed(1)} s`
                     : phase === "draining"
                       ? `draining · ${inFlight} open`
                       : "settled"}
@@ -299,6 +302,16 @@ export function ChaosRun() {
               )}
             </div>
             <pre className="mono summary-pre">{formatSummary(stats, 60, RATE)}</pre>
+            <p className="chaos-provenance">
+              Printed by the simulation on a virtual clock. The measured line under each counter is
+              the recorded run in <code>{CHAOS_RUN.source}</code>: {CHAOS_RUN.load}, kills{" "}
+              {killTimeline(CHAOS_RUN)}, {provenance(CHAOS_RUN)}
+              {CHAOS_RUN.p95CeilingMs
+                ? `, p95 ceiling ${CHAOS_RUN.p95CeilingMs} ms ${CHAOS_RUN.p95CeilingHeld ? "held" : "breached"}`
+                : ""}
+              . The simulated kill schedule comes from this section's seed, so it lands elsewhere
+              than the recorded one, and a simulated run never refuses a submission.
+            </p>
           </div>
         </div>
       </div>
@@ -319,10 +332,12 @@ function Stat({
   tone?: string;
   big?: boolean;
 }) {
+  const measured = MEASURED.get(label);
   return (
     <div className={`stat chaos-stat ${tone} ${big ? "is-big" : ""}`}>
       <dt>{label}</dt>
       <dd className="mono">{text ?? value?.toLocaleString("en-US")}</dd>
+      {measured ? <p className="stat-measured mono">measured {measured}</p> : null}
     </div>
   );
 }
