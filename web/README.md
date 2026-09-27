@@ -26,10 +26,12 @@ src/sim/          the model: no React, no DOM, deterministic
   cluster.ts        the three services, the broker and the clock in one object
   service.ts        a killable service: offsets commit on the tick after the poll
   broker.ts         topics, partitions by order id, lag, redeliveries
+  events.ts         the event contracts and the topic names, mirrored from the common module
   outbox.ts         the relay: attemptedAt before the send, publishedAt after the ack
   idempotent.ts     the processed-event store the consumers check
   orderService.ts   the saga, the stock check behind a breaker and a time limiter
   inventoryService.ts reservations, releases, the write-through cache
+  cache.ts          the Redis stock view: entries with a TTL that outlive a killed service
   paymentService.ts the authorizer, the deferred queue, the synthetic processor
   stateMachine.ts   the transition table
   resilience.ts     breaker, retry and time limiter windows
