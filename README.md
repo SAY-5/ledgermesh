@@ -64,31 +64,58 @@ Requirements: JDK 21, Maven 3.9, Docker with Compose, Python 3 (chaos harness).
 ## Chaos test
 
 ```bash
-make chaos        # alias: make demo
-make chaos-tight  # the same run with six kills and a two second restart
+make chaos           # alias: make demo
+make chaos-tight     # the same run with six kills and a two second restart
+make chaos-baseline  # the same load with no kills, the reference for the latency lines
 ```
 
-Measured output of the run recorded in this repository (macOS host, Docker via Colima, three
-kills, restart after 5 s, other containers sharing the machine):
+Two runs are recorded in the repository, written by the harness rather than copied into prose:
+[chaos/evidence/baseline/summary.txt](chaos/evidence/baseline/summary.txt) with no kills and [chaos/evidence/steady/summary.txt](chaos/evidence/steady/summary.txt) with three.
+`CHAOS_RECORD=1` refreshes the file for the profile in effect. Every recorded summary opens with the
+commit it was taken at, the UTC date, the host, the Docker server version and each `CHAOS_*` knob
+that was set, so a reader can repeat it.
+
+| | no kills | three kills |
+|---|---|---|
+| recorded | 2026-09-27T02:03:18Z at `c1c6fb3` | 2026-09-27T02:06:26Z at `8a0922c` |
+| orders submitted | 1200 | 1200 |
+| confirmed | 1147 | 1147 |
+| cancelled, out of stock | 53 | 53 |
+| failed / stuck | **0** | **0** |
+| kills | none | inventory-service @17s, order-service @37s, payment-service @52s |
+| saga latency p50 / p95 / max | 874 / 4532 / 14900 ms | 17206 / 35109 / 38902 ms |
+| retries ok / exhausted | 74 / 2 | 81 / 0 |
+| submits retried on their key | 0 over 0 orders | 1628 over 246 orders |
+| stock probes live / cache / refused | 99 / 2 / 0 | 46 / 31 / 24 |
+| breaker transitions | none | order-service/inventory CLOSED->OPEN x1; order-service/inventory HALF_OPEN->OPEN x2; order-service/inventory OPEN->HALF_OPEN x2 |
+
+The three kill run in full, as the file contains it:
 
 ```
 LedgerMesh chaos summary
-  load                 60s at 20 orders/s
+  recorded             2026-09-27T02:06:26Z at commit 8a0922c
+  host                 Darwin 25.0.0 arm64, 10 cpu, 16.0 GiB; Docker server 29.2.1 (colima); Python 3.14.4
+  knobs                CHAOS_PROFILE=steady CHAOS_DURATION=60 CHAOS_RATE=20 CHAOS_KILLS=3 CHAOS_RESTART_AFTER=5 CHAOS_VICTIMS=inventory-service payment-service order-service CHAOS_SEED=3 CHAOS_DRAIN_TIMEOUT=180 CHAOS_DRAIN_CAP=600 CHAOS_MAX_P95=90000
+  load                 60s at 20 orders/s, seed 3
   orders submitted     1200
-  confirmed            1162
-  cancelled (stock)    38
+  confirmed            1147
+  cancelled (stock)    53
   failed / stuck       0
-  kills                3  (inventory-service @16s, payment-service @37s, inventory-service @49s)
-  saga latency         p50 12825 ms   p95 36859 ms   max 39490 ms
-  breaker transitions  order-service/inventory CLOSED->OPEN x2; order-service/inventory HALF_OPEN->CLOSED x1; order-service/inventory HALF_OPEN->OPEN x3; order-service/inventory OPEN->HALF_OPEN x5
-  retries              with retry 59 ok / 0 exhausted, without retry 1100 ok / 0 failed
+  kills                3  (inventory-service @17s, order-service @37s, payment-service @52s)
+  saga latency         p50 17206 ms   p95 35109 ms   max 38902 ms
+  p95 ceiling          90000 ms (CHAOS_MAX_P95) held
+  breaker transitions  order-service/inventory CLOSED->OPEN x1; order-service/inventory HALF_OPEN->OPEN x2; order-service/inventory OPEN->HALF_OPEN x2
+  retries              with retry 81 ok / 0 exhausted, without retry 1066 ok / 0 failed
   deferred payments    0
   duplicate events     0 ignored by idempotent consumers
-  stock probes         {'live': 48, 'cache': 51, 'unknown': 0, 'error': 0}
+  compensations        0 reservations released, 0 releases for orders that held nothing
+  resubmits            1628 retried submits over 246 orders, 0 answered from the idempotency store (0 replays counted by the service), 0 gave up, 0 duplicate orders
+  stock probes         {'live': 46, 'cache': 31, 'unknown': 1, 'error': 24}
   services             order-service UP, inventory-service UP, payment-service UP
   consumer lag         worst 0 on order-service|inventory.rejected
   dead letter depth    worst 0 on order-service inventory.rejected
-  breaker states       inventory-service/redis CLOSED; order-service/inventory HALF_OPEN; payment-service/processor CLOSED
+  parked records       worst 0 on order-service inventory.rejected
+  breaker states       inventory-service/redis CLOSED; order-service/inventory CLOSED; payment-service/processor CLOSED
   in flight sagas      0
   stuck orders         0
 ```
@@ -98,14 +125,32 @@ reason other than stock, and rejected submissions. `cancelled (stock)` are order
 `SKU-SCARCE`, which is seeded with 40 units so the out of stock branch is exercised on every run.
 Retries, deferred payments and breaker transitions come from the synthetic processor's
 deterministic transient faults and from the kills themselves. Counters are snapshotted right
-before each kill because a killed JVM loses its in-memory meters. The last six lines are the
+before each kill because a killed JVM loses its in-memory meters. The last seven lines are the
 `/ops/overview` of each service read after the backlog drained.
 
+The counts are a function of the seed: both runs above used `CHAOS_SEED=3`, and both submitted
+1200 orders and cancelled the same 53 for stock. The latency lines
+are not, which is why every summary carries its host and its date. Order ids are fresh UUIDs, so
+which orders meet a transient processor fault differs from run to run, and the queue that builds
+behind a killed service moves with whatever else the machine is doing; a re-recording on a busier
+host reports materially different figures at the same seed. Each latency line is one measurement of
+one run, not a specification.
+
+Because of that, the gate on latency is a ceiling rather than an expected value: with
+`CHAOS_MAX_P95` set, the summary prints the ceiling and whether it held, and the harness exits
+non zero when the p95 is above it. The recorded three kill run held a ceiling of 90000 ms, roughly
+two and a half times its own p95, which is wide enough to survive a loaded developer machine and
+tight enough to catch a change that doubles recovery time. Both CI pipelines set it on the chaos
+job.
+
 Knobs: `CHAOS_PROFILE` (`steady` three kills restarting after 5 s, `tight` six kills restarting
-after 2 s), `CHAOS_DURATION`, `CHAOS_RATE`, `CHAOS_KILLS`, `CHAOS_RESTART_AFTER`,
-`CHAOS_KEEP_STACK=1`, `CHAOS_PYTHON`, and `LEDGERMESH_ORDER_PORT` / `LEDGERMESH_INVENTORY_PORT` /
-`LEDGERMESH_PAYMENT_PORT` when 8081 to 8083 are taken on the host.
-Output lands in `chaos/out/` (orders, kill timeline, metric snapshots, summary).
+after 2 s), `CHAOS_DURATION`, `CHAOS_RATE`, `CHAOS_KILLS`, `CHAOS_RESTART_AFTER`, `CHAOS_VICTIMS`
+(default all three services), `CHAOS_SEED` (kill schedule and load mix; a fresh one is drawn and
+printed when unset), `CHAOS_MAX_P95`, `CHAOS_DRAIN_TIMEOUT`, `CHAOS_DRAIN_CAP`, `CHAOS_RECORD=1`,
+`CHAOS_LABEL`, `CHAOS_KEEP_STACK=1`, `CHAOS_PYTHON`, and `LEDGERMESH_ORDER_PORT` /
+`LEDGERMESH_INVENTORY_PORT` / `LEDGERMESH_PAYMENT_PORT` when 8081 to 8083 are taken on the host.
+Output lands in `chaos/out/` (orders, kill timeline, metric snapshots, summary); the harness tears
+the stack down on every exit path unless `CHAOS_KEEP_STACK=1`.
 
 ## Tests
 
@@ -138,9 +183,36 @@ leaves stock untouched and the late reservation is rejected. Exactly once at the
 same idempotency key twice, two calls racing on one key, and the same key retried across a restart
 of the order service each place one order and return one body, and an outbox row put back into the
 crash window is sent again, ignored by the consumer, and leaves the stock ledger and the payment
-unchanged. The ops overview is checked against a listener that is
+unchanged. All three services boot in one JVM and therefore share one classpath, so the order and payment
+contexts exclude the Redis auto-configuration that only the inventory service needs; without that
+their health endpoints try to reach a Redis on localhost, readiness never turns UP and every saga
+assertion times out. The ops overview is checked against a listener that is
 stopped and started again: lag rises and falls, the order shows up as in flight and then does not,
 and the services that do not own the saga report the rest of the page without it.
+
+## Browser demo
+
+`web/` is a single page that runs a TypeScript model of the v1 mechanisms in the browser, so a
+visitor can kill a service and watch the saga settle without a Docker daemon:
+
+```bash
+cd web
+npm ci
+npm run dev             # vite dev server
+npm run build           # type check and the production bundle
+npm run selfcheck       # the model's invariants, in node
+npm run config:check    # the mirrored constants still match the services' application.yml
+npm run measured:check  # the measured figures still match chaos/evidence/
+```
+
+It models the saga and its compensation, the outbox and its crash window, idempotent consumers, the
+stock check behind a breaker and a time limiter, the Redis cache with its TTL, the retry policy and
+the deferred payment queue. It models nothing added after v1: saga deadlines and the reaper, the
+timeline endpoint, dead letters and replay, the `Idempotency-Key` header and `/ops/overview` exist
+only in the services. Both sets of constants the page quotes are generated, one from the three
+`application.yml` files and one from the summaries under `chaos/evidence/`, and every figure on the
+page is labelled simulated or measured. [web/README.md](web/README.md) has the module map, the
+virtual clock and the seeding model.
 
 ## API
 
@@ -178,16 +250,21 @@ startup by the first service up.
 
 ## CI
 
-`.gitlab-ci.yml` defines three stages:
+`.gitlab-ci.yml` defines four stages:
 
 1. **test**: `maven:3.9-eclipse-temurin-21` with a docker-in-docker service so Testcontainers can
-   run the integration tests; JUnit reports and the executable jars are kept as artifacts.
+   run the integration tests; JUnit reports and the executable jars are kept as artifacts. The
+   suite needs no service containers of its own: every broker, database and cache it uses is one
+   Testcontainers starts.
 2. **build**: a matrix job per service builds the multi-stage Dockerfile and pushes
    `$CI_REGISTRY_IMAGE/<service>:<short sha>` (and `latest` on the default branch).
 3. **chaos**: runs `make chaos` against the compose stack on merge requests and the default
-   branch and keeps `chaos/out/` as an artifact; the job fails if any order failed.
+   branch and keeps `chaos/out/` as an artifact; the job fails if any order failed or if the p95
+   saga latency is above the `CHAOS_MAX_P95` ceiling it sets.
+4. **web**: `npm ci`, the two generator checks, the production bundle and the simulation's
+   self-check, with `web/dist` kept as an artifact.
 
-`.github/workflows/ci.yml` mirrors the same three jobs.
+`.github/workflows/ci.yml` mirrors the same four jobs.
 
 ## Saga deadlines
 
