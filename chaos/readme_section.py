@@ -206,6 +206,10 @@ deltas = sorted(landed - target
                 for run in (chaos, chaos2)
                 for landed, (target, _) in zip(kill_moments(run), schedule))
 links = ", ".join(f"[{key}]({RUNS[key]})" for key in RUNS)
+# What the replay predicts the out of stock count to be, and how many recorded runs report it:
+# the split is a measurement, so the prose states the tally instead of promising the figure.
+predicted = mix["scarce"] - mix["covered"]
+in_order = sum(1 for run in runs.values() if int(run["cancelled"]) == predicted)
 
 
 WORDS = {0: "no", 1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
@@ -271,15 +275,18 @@ deterministic transient faults and from the kills themselves. Counters are snaps
 before each kill because a killed JVM loses its in-memory meters. The last seven lines are the
 `/ops/overview` of each service read after the backlog drained.
 
-The seed fixes the load and the kill schedule. Replaying the draw sequence of
-[chaos/loadgen.py](chaos/loadgen.py) at seed {seed} for the {mix["orders"]} orders of this profile
-gives {mix["scarce"]} orders for `{SCARCE}` asking for {mix["units"]} units, of which the
-{SCARCE_STOCK} seeded units cover the first {mix["covered"]} exactly. Replaying the schedule that
-[chaos/run.sh](chaos/run.sh) draws at the same seed gives {drawn}.
+The seed fixes the load, and the kill schedule the harness draws from it. Replaying the draw
+sequence of [chaos/loadgen.py](chaos/loadgen.py) at seed {seed} for the {mix["orders"]} orders of
+this profile gives {mix["scarce"]} orders for `{SCARCE}` asking for {mix["units"]} units, of which
+the {SCARCE_STOCK} seeded units cover the first {mix["covered"]} exactly, leaving {predicted} to be
+cancelled if the reservations arrive in the order they were submitted. Replaying the `$RANDOM` draws
+of [chaos/run.sh](chaos/run.sh) at the same seed gives {drawn}.
 
-The seed does not fix which orders land in which bucket. The two {WORDS[len(schedule)]} kill runs above ran the same
-load {"on the same host" if same_host else "on different hosts"} and confirmed {chaos["confirmed"]} and
-{chaos2["confirmed"]} orders, cancelling {chaos["cancelled"]} and {chaos2["cancelled"]} for stock:
+The seed does not fix which orders land in which bucket. {WORDS[in_order].capitalize()} of these
+{WORDS[len(runs)]} runs cancel exactly that many, and the two {WORDS[len(schedule)]} kill runs above
+ran the same load {"on the same host" if same_host else "on different hosts"} yet confirmed
+{chaos["confirmed"]} and {chaos2["confirmed"]} orders, cancelling {chaos["cancelled"]} and
+{chaos2["cancelled"]} for stock:
 
 {chr(10).join(repeats)}
 
@@ -289,7 +296,7 @@ arrive first, so the split moves by an order while the total does not. The momen
 not fixed either, because each kill waits for the service the previous one killed to report ready
 again: the {WORDS[len(deltas)]} kills of those two runs landed between {deltas[0]} s and
 {deltas[-1]} s after the targets drawn above. The latency lines, the retry, probe and breaker counts, and the duplicates the
-consumers ignore all move with whatever else the machine is doing. What repeats in all four runs:
+consumers ignore all move with whatever else the machine is doing. What repeats in all {WORDS[len(runs)]} runs:
 {base["submitted"]} orders submitted, every one of them terminal, nothing cancelled for any reason
 other than stock, and no submission refused.
 

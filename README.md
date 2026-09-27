@@ -134,14 +134,16 @@ and from the kills themselves. Counters are snapshotted right before each kill b
 loses its in-memory meters. The last seven lines are the `/ops/overview` of each service read after
 the backlog drained.
 
-The seed fixes the load and the kill schedule. Replaying the draw sequence of
-[chaos/loadgen.py](chaos/loadgen.py) at seed 3 for the 1200 orders of this profile gives 74 orders
-for `SKU-SCARCE` asking for 145 units, of which the 40 seeded units cover the first 21 exactly.
-Replaying the schedule that [chaos/run.sh](chaos/run.sh) draws at the same seed gives
+The seed fixes the load, and the kill schedule the harness draws from it. Replaying the draw
+sequence of [chaos/loadgen.py](chaos/loadgen.py) at seed 3 for the 1200 orders of this profile gives
+74 orders for `SKU-SCARCE` asking for 145 units, of which the 40 seeded units cover the first 21
+exactly, leaving 53 to be cancelled if the reservations arrive in the order they were submitted.
+Replaying the `$RANDOM` draws of [chaos/run.sh](chaos/run.sh) at the same seed gives
 inventory-service at t+15 s, order-service at t+32 s, payment-service at t+48 s.
 
-The seed does not fix which orders land in which bucket. The two three kill runs above ran the same
-load on the same host and confirmed 1147 and 1148 orders, cancelling 53 and 52 for stock:
+The seed does not fix which orders land in which bucket. Three of these four runs cancel exactly
+that many, and the two three kill runs above ran the same load on the same host yet confirmed 1147
+and 1148 orders, cancelling 53 and 52 for stock:
 
 | run | commit | submitted | confirmed | cancelled, out of stock | saga p95 |
 |---|---|---|---|---|---|
