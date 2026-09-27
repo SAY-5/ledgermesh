@@ -116,7 +116,9 @@ def host_memory_gib():
 def provenance_lines():
     """Where, when and with what this summary was produced, read from the environment."""
     commit = sh("git", "rev-parse", "--short", "HEAD") or "unknown"
-    dirty = " with uncommitted changes" if sh("git", "status", "--porcelain", "--untracked-files=no") else ""
+    # Untracked files count as changes: a summary recorded beside a file that is not in the
+    # commit cannot be re-derived from the commit the header names.
+    dirty = " with uncommitted changes" if sh("git", "status", "--porcelain") else ""
     when = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     mem = host_memory_gib()
     docker = sh("docker", "version", "--format", "{{.Server.Version}}") or "unknown"
