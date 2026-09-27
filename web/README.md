@@ -14,9 +14,9 @@ npm run config:check     # fails when the mirrored constants drift from the serv
 npm run measured:check   # fails when the measured figures drift from chaos/evidence/
 ```
 
-Both pipelines run `npm ci`, `npm run config:check`, `npm run measured:check`, `npm run build` and
-`npm run selfcheck` on every pipeline, so a change to a service's configuration or to a recorded
-chaos run fails here rather than drifting. The output in `dist/` is a static bundle with no server
+Every pipeline runs `npm ci`, `npm run config:check`, `npm run measured:check`, `npm run build` and
+`npm run selfcheck`, so a change to a service's configuration or to a recorded chaos run fails here
+rather than drifting. The output in `dist/` is a static bundle with no server
 side.
 
 ## Layout
