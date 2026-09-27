@@ -139,10 +139,12 @@ one run, not a specification.
 
 Because of that, the gate on latency is a ceiling rather than an expected value: with
 `CHAOS_MAX_P95` set, the summary prints the ceiling and whether it held, and the harness exits
-non zero when the p95 is above it. The recorded three kill run held a ceiling of 90000 ms, roughly
-two and a half times its own p95, which is wide enough to survive a loaded developer machine and
-tight enough to catch a change that doubles recovery time. Both CI pipelines set it on the chaos
-job.
+non zero when the p95 is above it. Both CI pipelines set 90000 ms on their chaos job, and the
+recorded three kill run above held the same ceiling. The number is deliberately loose, because the
+same profile costs very different amounts on different hosts: the recorded run reports a p95 of
+35109 ms on the developer machine, and the chaos job of this branch reported 58352 ms on a GitHub
+hosted runner. A ceiling that would catch a doubling on the faster host would fail on the slower
+one for no reason, so this one catches a gross regression rather than a subtle one.
 
 Knobs: `CHAOS_PROFILE` (`steady` three kills restarting after 5 s, `tight` six kills restarting
 after 2 s), `CHAOS_DURATION`, `CHAOS_RATE`, `CHAOS_KILLS`, `CHAOS_RESTART_AFTER`, `CHAOS_VICTIMS`
