@@ -1,0 +1,84 @@
+name: repeat
+
+# Runs one integration test class over and over, each run in a fresh JVM against fresh containers,
+# and counts the runs it failed. It tells an intermittent failure from a one off, and shows whether
+# a fix holds. Start it from the Actions tab or with
+#   gh workflow run repeat.yml --ref <branch> -f test=ExactlyOnceIT -f runs=50
+on:
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "failsafe selector, as passed to -Dit.test"
+        default: ExactlyOnceIT
+      runs:
+        description: "total runs, dealt out over five runners"
+        default: "50"
+
+jobs:
+  repeat:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5]
+    env:
+      TEST: ${{ inputs.test }}
+      RUNS: ${{ inputs.runs }}
+      SHARD: ${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - run: mvn -B --no-transfer-progress -DskipTests install
+      - name: run the class on a fresh stack each time
+        run: |
+          reports=e2e-tests/target/failsafe-reports
+          mkdir -p out
+          : > out/tally.txt
+          for ((i = SHARD; i <= RUNS; i += 5)); do
+            if [ -d "$reports" ]; then find "$reports" -delete; fi
+            if mvn -B --no-transfer-progress -pl e2e-tests verify -Dit.test="$TEST" \
+                -Dspotless.check.skip=true > "out/run-$i.log" 2>&1; then
+              line="run $i: passed"
+            else
+              failing=$(awk '/<testcase /{ match($0, / name="[^"]*"/); name = substr($0, RSTART + 7, RLENGTH - 8) }
+                /<(failure|error)[ >]/{ print name }' "$reports"/TEST-*.xml 2>/dev/null | sort -u | paste -sd, - || true)
+              line="run $i: failed: ${failing:-no test report, see run-$i.log}"
+              mkdir -p "out/run-$i"
+              cp "$reports"/*.xml "$reports"/*.txt "out/run-$i/" 2>/dev/null || true
+            fi
+            echo "$line" | tee -a out/tally.txt
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: repeat-shard-${{ matrix.shard }}
+          path: out/
+
+  summary:
+    needs: repeat
+    if: always()
+    runs-on: ubuntu-latest
+    env:
+      TEST: ${{ inputs.test }}
+      RUNS: ${{ inputs.runs }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: repeat-shard-*
+      - name: count the failed runs
+        run: |
+          cat repeat-shard-*/tally.txt | sort -t: -k1,1V > tally.txt
+          done=$(wc -l < tally.txt)
+          failed=$(grep -c ': failed' tally.txt || true)
+          {
+            echo "### $TEST: $failed of $done runs failed ($RUNS requested)"
+            echo
+            echo '```'
+            cat tally.txt
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          [ "$done" -eq "$RUNS" ] && [ "$failed" -eq 0 ]
