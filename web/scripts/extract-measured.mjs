@@ -11,9 +11,20 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repo = resolve(here, "..", "..");
 const target = resolve(here, "..", "src", "sim", "measured.generated.ts");
 
+// `blobCommit` is the commit that carries the summary, so the page can link to a permalink that
+// resolves on any branch. Re-derive it after recording a run:
+//   git log -1 --format=%H -- chaos/evidence/<label>/summary.txt
 const RUNS = [
-  { key: "baseline", path: "chaos/evidence/baseline/summary.txt" },
-  { key: "chaos", path: "chaos/evidence/steady/summary.txt" },
+  {
+    key: "baseline",
+    path: "chaos/evidence/baseline/summary.txt",
+    blobCommit: "8a0922c1b86d8b285e7f20433243e7af94a7805b",
+  },
+  {
+    key: "chaos",
+    path: "chaos/evidence/steady/summary.txt",
+    blobCommit: "37414de80a3bdc26bd943c11e6c848241b85a6cd",
+  },
 ];
 
 function field(raw, label) {
@@ -106,7 +117,7 @@ const runs = {};
 for (const run of RUNS) {
   const raw = readFileSync(resolve(repo, run.path), "utf8");
   try {
-    runs[run.key] = { source: run.path, ...parse(raw), raw };
+    runs[run.key] = { source: run.path, blobCommit: run.blobCommit, ...parse(raw), raw };
   } catch (err) {
     throw new Error(`${run.path}: ${err.message}`);
   }

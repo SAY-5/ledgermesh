@@ -80,7 +80,11 @@ export function Hero() {
             {CHAOS_RUN.probes.cache} from cache, {CHAOS_RUN.probes.error} refused while a service was
             down; {CHAOS_RUN.resubmits} submits retried on their idempotency key over{" "}
             {CHAOS_RUN.retriedOrders} orders. {provenance(CHAOS_RUN)}. Read from{" "}
-            <a href={`${REPO}/blob/main/${CHAOS_RUN.source}`} target="_blank" rel="noreferrer">
+            <a
+              href={`${REPO}/blob/${CHAOS_RUN.blobCommit}/${CHAOS_RUN.source}`}
+              target="_blank"
+              rel="noreferrer"
+            >
               {CHAOS_RUN.source}
             </a>
             ; every figure below this line is simulated in the browser on a virtual clock.

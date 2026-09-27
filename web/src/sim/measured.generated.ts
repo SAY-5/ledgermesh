@@ -4,6 +4,7 @@
 export const MEASURED = {
   "baseline": {
     "source": "chaos/evidence/baseline/summary.txt",
+    "blobCommit": "8a0922c1b86d8b285e7f20433243e7af94a7805b",
     "recordedAt": "2026-09-27T02:03:18Z",
     "commit": "c1c6fb3",
     "host": "Darwin 25.0.0 arm64, 10 cpu, 16.0 GiB; Docker server 29.2.1 (colima); Python 3.14.4",
@@ -37,6 +38,7 @@ export const MEASURED = {
   },
   "chaos": {
     "source": "chaos/evidence/steady/summary.txt",
+    "blobCommit": "37414de80a3bdc26bd943c11e6c848241b85a6cd",
     "recordedAt": "2026-09-27T02:06:26Z",
     "commit": "8a0922c",
     "host": "Darwin 25.0.0 arm64, 10 cpu, 16.0 GiB; Docker server 29.2.1 (colima); Python 3.14.4",

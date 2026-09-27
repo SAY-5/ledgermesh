@@ -14,6 +14,8 @@ export interface MeasuredKill {
 /** The shape both recorded runs share; a baseline has no kills and no ceiling. */
 export interface MeasuredRun {
   readonly source: string;
+  /** the commit that carries `source`, for a link that does not wait for a merge */
+  readonly blobCommit: string;
   readonly recordedAt: string;
   readonly commit: string;
   readonly host: string;
