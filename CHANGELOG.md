@@ -11,6 +11,18 @@ see the versioning note in [CONTRIBUTING.md](CONTRIBUTING.md).
   reserved, charged and confirmed. The answer and the consumers' processed markers are now always
   inserted, and the `repeat` workflow runs `ExactlyOnceIT` 50 times on every pull request that
   changes that code.
+* A payment has two creators on two topics, the `inventory.reserved` listener and a re-drive that
+  finds no payment on file, and it was saved with a merge as well: a creator that saved after the
+  other had committed the same order overwrote that payment with its own copy. A new payment is now
+  always inserted and flushed, so the second creator fails on the primary key before it calls the
+  processor and takes the payment on file when the error handler delivers it again. A new order is
+  inserted without the read a merge made first.
+* The order service counts a created or changed order in `ledgermesh.orders.transitions` and logs
+  it only once its transaction has committed, so the loser of a race on one idempotency key no
+  longer shows up in either.
+* The `repeat` workflow fails the runner that had a failed run as well as its summary, and also
+  starts for changes to the root `pom.xml`, the saga service, the order service's configuration
+  and the test stack. It is not a required check.
 * Dead letter replay commits only the offsets it handled and waits for its group assignment before
   treating silence as an empty topic, and a record whose replays are used up is copied to a
   retained `<topic>.parked` topic and listed by `GET /admin/dlq/parked` instead of vanishing.
