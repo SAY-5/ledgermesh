@@ -72,10 +72,10 @@ edit in the services cannot leave the page quietly wrong.
 figure the page presents as measured is built from that module, and the self-check asserts each
 number it renders appears in the summary it claims to come from. A figure typed by hand fails the
 check. The permalink the hero prints beside the figures is read out of the history rather than kept
-as a constant, so commit a recorded summary before running `npm run measured`: the generator reads
+as a constant, so commit a recorded summary before running `npm run measured`. The generator reads
 the commit that introduced the bytes the summary holds, so a later commit that touches the file
-without changing them leaves the link where it was, refuses while the file differs from its
-committed version, and needs the full history rather than a shallow clone.
+without changing them leaves the link where it was. The generator refuses while the file differs
+from its committed version, and it needs the full history rather than a shallow clone.
 
 ## What this page does not simulate
 
