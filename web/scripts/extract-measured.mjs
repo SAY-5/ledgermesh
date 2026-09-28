@@ -27,34 +27,71 @@ function git(args) {
 }
 
 /**
- * The commit that carries `path`, read from this repository's own history, so the page links to a
- * permalink that shows the bytes the figures were read from.
+ * The commit that introduced the bytes `path` holds, read from this repository's own history, so
+ * the page links to a permalink that shows the text the figures were read from.
  *
- * This used to be a `blobCommit` constant beside each run, re-derived by hand. Nothing tied the
- * constant to the file, so a re-recorded summary left the link resolving against an older version
- * of it, which a reader cannot tell apart from the current one, and `--check` regenerated from the
- * same constant and so could not catch the drift. Derived here instead, the commit moves with the
- * file: `--check` re-reads it from the history and fails until the generated file is refreshed, and
- * the blob comparison below fails while the recorded run is still uncommitted.
+ * This used to be a `blobCommit` constant beside each run, re-derived by hand. `--check` did fail on
+ * a re-recorded summary, because the figures and raw text it compares moved with the file. What it
+ * missed was the link: once `npm run measured` had refreshed them, it regenerated from the same
+ * constant, so a permalink still naming the earlier recording passed, and a reader cannot tell that
+ * version apart from the current one.
+ *
+ * The commit is keyed on the content, not on the last commit to touch the path: it is the oldest
+ * commit git log reports as adding the blob the working copy holds at that path, and each one it
+ * reports is checked to hold that blob, so whichever is found, the link shows those bytes. A merge
+ * counts, compared with its first parent, since git log would otherwise not diff merges and a
+ * conflict resolved to new text would have no commit at all. A later commit that touches the file
+ * without changing its bytes, or restores bytes it held before, leaves the link where it was; a
+ * re-recorded summary moves it, and `--check` fails until the generated file is refreshed. A working
+ * copy that differs from the version committed at HEAD is refused, and so is a shallow clone, whose
+ * truncated history cannot show where the blob came from.
+ *
+ * `--check` proves local consistency: the generated file matches what this clone's history derives.
+ * It cannot prove the commit exists anywhere else. CI does, because it checks out from the remote
+ * with the full history and runs the same derivation, so the commit it finds is one the remote has.
  */
 function blobCommit(path, raw) {
   if (git(["rev-parse", "--is-shallow-repository"]).trim() === "true") {
     throw new Error(
-      "the history is truncated by a shallow clone, so the commit that carries the summary " +
+      "the history is truncated by a shallow clone, so the commit that introduced the summary " +
         "cannot be identified. Run `git fetch --unshallow`, or check out with fetch-depth: 0",
     );
   }
-  const commit = git(["log", "-1", "--format=%H", "--", path]).trim();
-  if (!/^[0-9a-f]{40}$/.test(commit)) {
-    throw new Error("no commit in this history touches it; commit the recorded run first");
+  const blob = blobAt("HEAD", path);
+  if (!blob) {
+    throw new Error("HEAD does not contain it; commit the recorded run first");
   }
-  if (git(["cat-file", "blob", `${commit}:${path}`]) !== raw) {
+  if (git(["cat-file", "blob", blob]) !== raw) {
     throw new Error(
-      `differs from its committed version at ${commit}: commit the recorded run, then run ` +
+      "differs from the version committed at HEAD: commit the recorded run, then run " +
         "`npm run measured`, so the link resolves to the text these figures were read from",
     );
   }
+  // One hash per line, newest first, for each commit whose diff at this path (against its first
+  // parent, for a merge) adds or removes the blob. `--diff-merges=first-parent` also turns on the
+  // patch of every commit it lists, so without `--no-patch` each line of those patches would come
+  // back here as a commit to look up. The ones whose tree holds the blob introduced it; the last of
+  // those introduced it first.
+  const introduced = git([
+    "log", "--format=%H", "--diff-merges=first-parent", "--no-patch", `--find-object=${blob}`,
+    "--", path,
+  ])
+    .split("\n")
+    .filter((commit) => commit && blobAt(commit, path) === blob);
+  const commit = introduced.at(-1);
+  if (!commit) {
+    throw new Error(`no commit in this history introduces blob ${blob}`);
+  }
   return commit;
+}
+
+/** The blob `rev` holds at `path`, or "" when it holds none. */
+function blobAt(rev, path) {
+  try {
+    return git(["rev-parse", "--verify", "--quiet", `${rev}:${path}`]).trim();
+  } catch {
+    return "";
+  }
 }
 
 function field(raw, label) {

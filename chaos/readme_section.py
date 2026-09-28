@@ -10,11 +10,10 @@ with the harness's own code, or read out of a service's configuration. Usage:
 The prose lives here rather than in the README, because a sentence that quotes a figure has to be
 regenerated with it. Edit the section by editing this file and running it.
 """
-import os
+import json
 import pathlib
 import random
 import re
-import subprocess
 import textwrap
 import sys
 
@@ -101,24 +100,36 @@ def kill_moments(run):
     return [int(m) for m in re.findall(r"@(\d+)s", run["kills"])]
 
 
-def seeded_schedule(run):
-    """Replay the kill schedule the harness draws, in the shell that draws it."""
-    script = """
-      victims=($CHAOS_VICTIMS)
-      RANDOM=$CHAOS_SEED
-      for (( i=0; i<CHAOS_KILLS; i++ )); do
-        slot=$(( CHAOS_DURATION / (CHAOS_KILLS + 1) ))
-        target=$(( slot * (i + 1) + RANDOM % (slot / 2 + 1) - slot / 4 ))
-        (( target < 5 )) && target=5
-        echo "$target ${victims[$(( RANDOM % ${#victims[@]} ))]}"
-      done
-    """
-    env = dict(os.environ)
-    for name in ("CHAOS_SEED", "CHAOS_KILLS", "CHAOS_DURATION"):
-        env[name] = knob(run, name)
-    env["CHAOS_VICTIMS"] = re.search(r"CHAOS_VICTIMS=(.*?)(?= CHAOS_\w+=|$)", run["knobs"]).group(1)
-    done = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, check=True)
-    return [(int(t), v) for t, v in (line.split() for line in done.stdout.split("\n") if line.strip())]
+def kill_timeline(run):
+    """The kills a run recorded: each victim and the second it landed, from the summary, with the
+    target run.sh drew for it and the second it sent the kill, from the kills.jsonl beside the
+    summary, when the run recorded them.
+
+    The schedule is read rather than replayed. run.sh draws it with bash's $RANDOM, and one seed
+    gives a different sequence under the bash 3.2 that macOS ships than under bash 5, so a replay
+    matches only the runs taken under the bash that replays it.
+
+    The summary's @Ns counts from the load generator's start, while target and sent count from
+    run.sh's START, and CI runs log the same kill a second either side of its @Ns. So a target is
+    only ever compared with the sent second on its own clock, and a kill sent before its target
+    is refused, since on one clock that cannot happen."""
+    path = pathlib.Path(run["path"]).with_name("kills.jsonl")
+    if not (REPO / path).is_file():
+        raise SystemExit(f"{path}: missing, so the kills of {run['path']} are not recorded")
+    recorded = [json.loads(line) for line in (REPO / path).read_text().splitlines() if line.strip()]
+    if [k["service"] for k in recorded] != re.findall(r"(\S+) @\d+s", run["kills"]):
+        raise SystemExit(f"{path}: the victims differ from the kills line of {run['path']}")
+    timeline = []
+    for k, at in zip(recorded, kill_moments(run)):
+        target, sent = k.get("target"), k.get("sent")
+        if (target is None) != (sent is None):
+            raise SystemExit(f"{path}: {k['service']} records only one of target and sent, so its "
+                             "delay cannot be read on one clock; record the run again")
+        if target is not None and sent < target:
+            raise SystemExit(f"{path}: {k['service']} was sent at t+{sent} s, before its target "
+                             f"t+{target} s, so the two are not readings of one clock")
+        timeline.append({"service": k["service"], "landed": at, "target": target, "sent": sent})
+    return timeline
 
 
 def seeded_mix(run):
@@ -200,11 +211,34 @@ for key in RUNS:
                    f'{run["confirmed"]} | {run["cancelled"]} | {latency(run)[1]} ms |')
 
 mix = seeded_mix(chaos)
-schedule = seeded_schedule(chaos)
-drawn = ", ".join(f"{victim} at t+{target} s" for target, victim in schedule)
-deltas = sorted(landed - target
-                for run in (chaos, chaos2)
-                for landed, (target, _) in zip(kill_moments(run), schedule))
+timelines = {"steady": kill_timeline(chaos), "steady-repeat": kill_timeline(chaos2)}
+kill_count = len(timelines["steady"])
+if len(timelines["steady-repeat"]) != kill_count:
+    raise SystemExit("the two kill runs record different numbers of kills")
+landed = {key: ", ".join(f'{k["service"]} at t+{k["landed"]} s' for k in kills)
+          for key, kills in timelines.items()}
+apart = sorted(abs(a["landed"] - b["landed"]) for a, b in zip(*timelines.values()))
+# Runs recorded before run.sh wrote each kill's target carry none; the prose says so rather than
+# replaying the draw. It compares the two runs, so both must be on the same side.
+drawn = {all(k["target"] is not None for k in kills) for kills in timelines.values()}
+if len(drawn) != 1:
+    raise SystemExit("only one of the two kill runs records the targets it drew; record both")
+if drawn.pop():
+    targets = [", ".join(f't+{k["target"]} s' for k in kills) for kills in timelines.values()]
+    # sent, not landed: landed is the summary's @Ns, which counts from the load generator's start
+    # rather than from the START the targets count from.
+    late = sorted(k["sent"] - k["target"] for kills in timelines.values() for k in kills)
+    target_note = (f"The `kills.jsonl` beside each summary also records the targets the harness "
+                   f"drew, {targets[0]} in the first and {targets[1]} in the second, and the second "
+                   f"it sent each kill. Both count from the harness's own start and the summaries "
+                   f"from the load generator's, so a target is compared only with the second its "
+                   f"kill was sent.")
+    late_note = f", and each was sent between {late[0]} s and {late[-1]} s after its target"
+else:
+    target_note = ("The harness also writes the target it drew for each kill into the `kills.jsonl` "
+                   "beside the summary, but these two runs were recorded before it did, so the "
+                   "section quotes where their kills landed rather than where they were drawn.")
+    late_note = ""
 links = ", ".join(f"[{key}]({RUNS[key]})" for key in RUNS)
 # What the replay predicts the out of stock count to be, and how many recorded runs report it:
 # the split is a measurement, so the prose states the tally instead of promising the figure.
@@ -253,7 +287,7 @@ make chaos-baseline  # the same load with no kills, the reference for the latenc
 
 Four runs are recorded in the repository, written by the harness rather than copied into prose:
 {links}. All four ran at `CHAOS_SEED={seed}`, {WORDS[2]} of them with no kills and
-{WORDS[2]} with {WORDS[len(schedule)]} kills. This section is written by
+{WORDS[2]} with {WORDS[kill_count]} kills. This section is written by
 [chaos/readme_section.py](chaos/readme_section.py) from those files, and
 `uv run python chaos/readme_section.py --check` fails when it has drifted from them. `CHAOS_RECORD=1` writes the summary of the profile in effect, under the name
 `CHAOS_LABEL` gives it. Every recorded summary opens with the commit it was taken at, the UTC date,
@@ -275,15 +309,19 @@ deterministic transient faults and from the kills themselves. Counters are snaps
 before each kill because a killed JVM loses its in-memory meters. The last seven lines are the
 `/ops/overview` of each service read after the backlog drained.
 
-The seed fixes the load, and the kill schedule the harness draws from it. Replaying the draw
-sequence of [chaos/loadgen.py](chaos/loadgen.py) at seed {seed} for the {mix["orders"]} orders of
-this profile gives {mix["scarce"]} orders for `{SCARCE}` asking for {mix["units"]} units, of which
-the {SCARCE_STOCK} seeded units cover the first {mix["covered"]} exactly, leaving {predicted} to be
-cancelled if the reservations arrive in the order they were submitted. Replaying the `$RANDOM` draws
-of [chaos/run.sh](chaos/run.sh) at the same seed gives {drawn}.
+The seed fixes the load, and, under one bash, the kill schedule the harness draws from it. Replaying
+the draw sequence of [chaos/loadgen.py](chaos/loadgen.py) at seed {seed} for the {mix["orders"]}
+orders of this profile gives {mix["scarce"]} orders for `{SCARCE}` asking for {mix["units"]} units,
+of which the {SCARCE_STOCK} seeded units cover the first {mix["covered"]} exactly, leaving
+{predicted} to be cancelled if the reservations arrive in the order they were submitted. The kill
+schedule is read from the runs instead of replayed, because [chaos/run.sh](chaos/run.sh) draws it
+with `$RANDOM`, and one seed gives a different sequence under the bash 3.2 that macOS ships than
+under the bash 5 of a Linux runner. The summaries record the kills each run made:
+[steady]({RUNS["steady"]}) killed {landed["steady"]}, and [steady-repeat]({RUNS["steady-repeat"]})
+killed {landed["steady-repeat"]}. {target_note}
 
 The seed does not fix which orders land in which bucket. {WORDS[in_order].capitalize()} of these
-{WORDS[len(runs)]} runs cancel exactly that many, and the two {WORDS[len(schedule)]} kill runs above
+{WORDS[len(runs)]} runs cancel exactly that many, and the two {WORDS[kill_count]} kill runs above
 ran the same load {"on the same host" if same_host else "on different hosts"} yet confirmed
 {chaos["confirmed"]} and {chaos2["confirmed"]} orders, cancelling {chaos["cancelled"]} and
 {chaos2["cancelled"]} for stock:
@@ -294,8 +332,7 @@ Reservations reach the inventory service concurrently rather than in the order t
 and {SCARCE_STOCK} units cover one order more or one order fewer depending on which quantities
 arrive first, so the split moves by an order while the total does not. The moment a kill lands is
 not fixed either, because each kill waits for the service the previous one killed to report ready
-again: the {WORDS[len(deltas)]} kills of those two runs landed between {deltas[0]} s and
-{deltas[-1]} s after the targets drawn above. The latency lines, the retry, probe and breaker counts, and the duplicates the
+again: kill for kill, those two runs landed {apart[0]} s to {apart[-1]} s apart{late_note}. The latency lines, the retry, probe and breaker counts, and the duplicates the
 consumers ignore all move with whatever else the machine is doing. What repeats in all {WORDS[len(runs)]} runs:
 {base["submitted"]} orders submitted, every one of them terminal, nothing cancelled for any reason
 other than stock, and no submission refused.
