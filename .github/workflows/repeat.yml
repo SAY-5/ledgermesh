@@ -4,8 +4,10 @@ name: repeat
 # and counts the runs it failed. It tells an intermittent failure from a one off, and shows whether
 # a fix holds. Start it from the Actions tab or with
 #   gh workflow run repeat.yml --ref <branch> -f test=ExactlyOnceIT -f runs=50
-# A pull request that changes the exactly once code, or this workflow, gets 50 runs of
-# ExactlyOnceIT before it merges, because a race in that code fails only some of them.
+# Every push to a pull request that touches the paths below starts 50 runs of ExactlyOnceIT, about
+# seven minutes of wall time, because a race in that code fails only some of them. Nothing holds
+# the merge for the result (main has no branch protection), but a shard with a failed run fails its
+# job and the summary counts the failed runs, so a red result shows on the pull request.
 on:
   workflow_dispatch:
     inputs:
@@ -18,9 +20,15 @@ on:
   pull_request:
     paths:
       - .github/workflows/repeat.yml
+      # the Spring Data and Hibernate versions decide whether a save inserts or merges
+      - pom.xml
       - common/src/main/java/io/ledgermesh/common/idempotency/**
       - order-service/src/main/java/io/ledgermesh/order/api/OrderController.java
+      - order-service/src/main/java/io/ledgermesh/order/domain/Order.java
+      - order-service/src/main/java/io/ledgermesh/order/saga/OrderSagaService.java
+      - order-service/src/main/resources/application.yml
       - e2e-tests/src/test/java/io/ledgermesh/e2e/ExactlyOnceIT.java
+      - e2e-tests/src/test/java/io/ledgermesh/e2e/Stack.java
 
 concurrency:
   group: repeat-${{ github.ref }}
@@ -65,6 +73,7 @@ jobs:
             fi
             echo "$line" | tee -a out/tally.txt
           done
+          if grep -q ': failed' out/tally.txt; then exit 1; fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
