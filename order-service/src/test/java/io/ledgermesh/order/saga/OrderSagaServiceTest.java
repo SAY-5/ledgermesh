@@ -176,8 +176,7 @@ class OrderSagaServiceTest {
   }
 
   private double transitions(OrderStatus to) {
-    Counter counter =
-        meters.find("ledgermesh.orders.transitions").tag("to", to.name()).counter();
+    Counter counter = meters.find("ledgermesh.orders.transitions").tag("to", to.name()).counter();
     return counter == null ? 0 : counter.count();
   }
 }

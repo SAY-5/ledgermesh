@@ -31,8 +31,8 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 /**
  * Creates orders and applies saga events. Every state change, the event it emits and the timeline
  * row that records it are written in one transaction through the outbox. The change is counted and
- * logged once that transaction has committed, so a change that rolls back, like the order of a
- * call that lost the race for its idempotency key, is neither.
+ * logged once that transaction has committed, so a change that rolls back, like the order of a call
+ * that lost the race for its idempotency key, is neither.
  */
 @Service
 public class OrderSagaService {

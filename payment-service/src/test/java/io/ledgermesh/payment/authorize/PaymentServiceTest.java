@@ -207,7 +207,13 @@ class PaymentServiceTest {
     ConsumerRecord<String, String> redrive =
         consumed(
             new PaymentRequested(
-                "req-o10", "o10", "c-late", Instant.now(), "cust-late", new BigDecimal("99.00"), 1));
+                "req-o10",
+                "o10",
+                "c-late",
+                Instant.now(),
+                "cust-late",
+                new BigDecimal("99.00"),
+                1));
     ExecutorService pool = Executors.newSingleThreadExecutor();
     try {
       // the re-drive found no payment for the order and is held until the reservation's record
