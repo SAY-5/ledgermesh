@@ -62,7 +62,14 @@ public class Order {
   @Column(nullable = false)
   private int redrives;
 
-  @Version private long version;
+  /**
+   * Null until the order is inserted. The id is assigned, so the version is how the repository
+   * tells a new order from a stored one; a primitive one would make it merge a new order, reading
+   * the row before inserting it.
+   */
+  @Version
+  @Column(nullable = false)
+  private Long version;
 
   protected Order() {}
 
