@@ -15,6 +15,7 @@ import io.ledgermesh.order.domain.OrderStatus;
 import io.ledgermesh.order.domain.SagaEvent;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
@@ -62,15 +63,19 @@ class OrderSagaServiceTest {
 
   @Test
   void reservationThenPaymentConfirmsTheOrder() {
+    Timer latency = meters.get("ledgermesh.saga.latency").timer();
+    long completed = latency.count();
     Order order = saga.create("cust-1", List.of(new OrderItem("sku-1", 1, new BigDecimal("5.00"))));
 
     saga.apply(order.getId(), SagaEvent.INVENTORY_RESERVED, "c");
     assertThat(orders.findById(order.getId()).orElseThrow().getStatus())
         .isEqualTo(OrderStatus.RESERVED);
+    assertThat(latency.count()).isEqualTo(completed);
 
     saga.apply(order.getId(), SagaEvent.PAYMENT_COMPLETED, "c");
     Order confirmed = orders.findById(order.getId()).orElseThrow();
     assertThat(confirmed.getStatus()).isEqualTo(OrderStatus.CONFIRMED);
+    assertThat(latency.count()).isEqualTo(completed + 1);
     assertThat(outbox.findAll())
         .extracting(OutboxEvent::getTopic)
         .containsExactly(Topics.ORDER_CREATED);
