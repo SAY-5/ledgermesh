@@ -52,7 +52,16 @@ public class Payment {
   @Column(nullable = false)
   private Instant updatedAt;
 
-  @Version private long version;
+  /**
+   * Null until the payment is inserted, which is how the repository tells a new payment from a
+   * stored one: the id is the order id, assigned rather than generated. A primitive version would
+   * make it merge a new payment, and a merge reads the row first, so a creator that saves after
+   * another has committed the same order would overwrite that payment instead of failing on the
+   * primary key.
+   */
+  @Version
+  @Column(nullable = false)
+  private Long version;
 
   protected Payment() {}
 

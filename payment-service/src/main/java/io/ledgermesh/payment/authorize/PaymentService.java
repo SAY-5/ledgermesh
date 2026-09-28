@@ -26,6 +26,13 @@ import org.springframework.transaction.support.TransactionTemplate;
  * transaction. {@link #attempt} runs the authorization outside any transaction and then commits the
  * outcome plus its outbox event. A process killed between the two leaves an open payment which the
  * deferred queue picks up, so an order can only ever be completed or declined, never forgotten.
+ *
+ * <p>A payment has two creators: {@link #record}, fed by {@code inventory.reserved}, and {@link
+ * #requestAgain}, fed by {@code order.payment_requested} when no payment is on file. They consume
+ * different topics on different listener threads, so both can find no payment for one order and
+ * create it. The payment is inserted and flushed right away, so whichever creator comes second
+ * fails on the primary key before it calls the processor, its transaction rolls back, and the
+ * redelivery the error handler makes finds the payment on file.
  */
 @Service
 public class PaymentService {
@@ -73,7 +80,7 @@ public class PaymentService {
         .findById(event.orderId())
         .orElseGet(
             () ->
-                payments.save(
+                payments.saveAndFlush(
                     new Payment(
                         event.orderId(),
                         event.customerId(),
@@ -96,7 +103,7 @@ public class PaymentService {
                     .findById(event.orderId())
                     .orElseGet(
                         () ->
-                            payments.save(
+                            payments.saveAndFlush(
                                 new Payment(
                                     event.orderId(),
                                     event.customerId(),
