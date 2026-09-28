@@ -399,6 +399,11 @@ prints the overview of all three services at the end of a run.
 
 Every entry in full is in [CHANGELOG.md](CHANGELOG.md).
 
+* **v6.0.0**: two calls racing on one `Idempotency-Key` can no longer both place and pay for an
+  order, and neither creator of a payment can overwrite the other's; a reservation ledger per order
+  and sku, a retained `<topic>.parked` topic behind `GET /admin/dlq/parked`, and a seeded chaos
+  harness that also kills the order service. Stock a 5.0.0 inventory service reserved is not
+  credited back by a release after the upgrade, so let open orders finish first.
 * **v5.0.0**: `GET /ops/overview` per service (health, consumer lag, dead letter depth, breaker
   states, in flight and stuck sagas), a `ledgermesh.saga.stuck` gauge, a `tight` chaos profile with
   twice the kills and a two second restart, and the overview in the chaos summary.

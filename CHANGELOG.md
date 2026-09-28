@@ -3,7 +3,7 @@
 Dates are the commit dates of the release tags. Each numbered release is a demo milestone;
 see the versioning note in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
+## v6.0.0 (2026-09-28)
 
 * Two calls racing on one `Idempotency-Key` could both place an order. The answer was saved with a
   merge, which reads the row first: a call that stored its answer after the other had committed
@@ -31,6 +31,9 @@ see the versioning note in [CONTRIBUTING.md](CONTRIBUTING.md).
 * Inventory keeps a reservation row per order and sku: a release credits exactly what that order
   held, a release that arrives before its reservation leaves stock untouched and blocks the late
   reservation, and a repeated reservation takes stock once.
+* Stock that a 5.0.0 inventory service reserved has no reservation rows, so when its order is
+  cancelled after the upgrade the release credits nothing and leaves released markers instead. Let
+  open orders reach CONFIRMED or CANCELLED before upgrading the inventory service.
 * The chaos harness kills the order service as well, sends an `Idempotency-Key` per order and
   retries it while intake is away, seeds the kill schedule from `CHAOS_SEED`, tears the stack down
   on every exit path, stamps commit, host, Docker version and knobs into the summary, records runs
