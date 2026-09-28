@@ -244,7 +244,7 @@ class PaymentServiceTest {
   }
 
   @Test
-  void aReservationThatRecordsThePaymentAfterAReDriveDidFailsAndTakesThePaymentOnFile()
+  void aReservationThatRecordsAfterAReDriveAuthorizedThePaymentStillFailsAndLeavesItAlone()
       throws Exception {
     when(processor.authorize(anyString(), anyString(), any(), anyInt()))
         .thenReturn(new Approved("AUTH-11"));
@@ -264,7 +264,9 @@ class PaymentServiceTest {
     ExecutorService pool = Executors.newSingleThreadExecutor();
     try {
       // the reservation found no payment for the order and is held until a re-drive has
-      // recorded and authorized one
+      // recorded and authorized one. The authorization moved the payment's version on, so a merge
+      // failed here as well, on the optimistic lock, and never overwrote it; this guards the
+      // insert failing on the primary key and the redelivery leaving the settled payment alone
       Future<?> first = pool.submit(() -> late.onInventoryReserved(reservation));
       assertThat(lookedUp.await(10, TimeUnit.SECONDS)).isTrue();
       listener.onPaymentRequested(consumed(requested("o11")));

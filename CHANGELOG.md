@@ -12,11 +12,13 @@ see the versioning note in [CONTRIBUTING.md](CONTRIBUTING.md).
   inserted, and the `repeat` workflow runs `ExactlyOnceIT` 50 times on every pull request that
   changes that code.
 * A payment has two creators on two topics, the `inventory.reserved` listener and a re-drive that
-  finds no payment on file, and it was saved with a merge as well: a creator that saved after the
-  other had committed the same order overwrote that payment with its own copy. A new payment is now
-  always inserted and flushed, so the second creator fails on the primary key before it calls the
-  processor and takes the payment on file when the error handler delivers it again. A new order is
-  inserted without the read a merge made first.
+  finds no payment on file, and it was saved with a merge as well. A creator that saved after the
+  other had committed the payment, but before anything had attempted it, overwrote it with its own
+  copy; one that saved after an attempt had moved the payment's version on already failed, on the
+  optimistic lock, and its redelivery took the payment on file. A new payment is now always
+  inserted and flushed, so the second creator fails on the primary key in either case, before it
+  calls the processor, and takes the payment on file when the error handler delivers it again. A
+  new order is inserted without the read a merge made first.
 * The order service counts a created or changed order in `ledgermesh.orders.transitions` and logs
   it only once its transaction has committed, so the loser of a race on one idempotency key no
   longer shows up in either.
