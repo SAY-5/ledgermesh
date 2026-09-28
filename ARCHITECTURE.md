@@ -37,7 +37,10 @@ change the outcome of any order. This document explains the mechanisms that make
 | `order.payment_requested` | order | payment | the payment deadline passed; answer with the outcome on file or attempt now |
 
 Every topic has three partitions and every message is keyed by order id, so all events for one
-order are processed in sequence within a topic.
+order are processed in sequence within a topic. Across topics they are not: each topic has a
+listener container and threads of its own, so one order's events on two topics can be handled at
+the same moment, and what both of them write has to hold up under that (the reservation ledger and
+the payment's two creators below).
 
 ## Transactional outbox
 
@@ -72,7 +75,9 @@ inserts after the commit fails at once. Both cases depend on the answer being in
 merged: the key is assigned, not generated, and a merge reads the row first, so it would find a
 winner that had already committed and overwrite its answer instead of failing. `IdempotentRequest`
 and the consumers' `ProcessedEvent` marker therefore tell the repository that an instance built in
-code is new until it has been inserted, so saving it inserts rather than merges.
+code is new until it has been inserted, so saving it inserts rather than merges. `Payment` and
+`Order` have assigned ids as well, and a version: it is a wrapper that stays null until the row is
+inserted, which is how the repository recognises a new versioned entity.
 
 ## Idempotent consumers
 
@@ -198,6 +203,15 @@ The processor call is decorated as `Retry(CircuitBreaker(TimeLimiter(call)))`:
 `DeferredPaymentSweeper` retries it with linear backoff. The same sweeper picks up payments that
 were recorded but never attempted, which is exactly what a kill between "record" and "attempt"
 leaves behind. Declines are business results, not exceptions: they are final and never retried.
+
+A payment has two creators. The `inventory.reserved` listener records it, and a re-drive on
+`order.payment_requested` records it from the request when none is on file. The two topics are
+consumed on different threads, so both can find no payment for one order and create one. The
+payment is inserted and flushed at once, so the creator that comes second fails on the primary key
+before it calls the processor. Its transaction rolls back, and the error handler, which retries a
+`DataIntegrityViolationException` like any failure it does not know to be permanent, delivers the
+record again; this time it finds the payment on file, so the reservation leaves a settled payment
+alone and the re-drive attempts an open one or re-emits a settled one's outcome.
 
 The synthetic processor is deterministic: outcomes depend only on the order id and the attempt
 number, so a run is reproducible and the retry and breaker paths are exercised on every run.
