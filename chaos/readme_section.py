@@ -102,19 +102,34 @@ def kill_moments(run):
 
 def kill_timeline(run):
     """The kills a run recorded: each victim and the second it landed, from the summary, with the
-    target run.sh drew for it, from the kills.jsonl beside the summary, when the run recorded one.
+    target run.sh drew for it and the second it sent the kill, from the kills.jsonl beside the
+    summary, when the run recorded them.
 
     The schedule is read rather than replayed. run.sh draws it with bash's $RANDOM, and one seed
     gives a different sequence under the bash 3.2 that macOS ships than under bash 5, so a replay
-    matches only the runs taken under the bash that replays it."""
+    matches only the runs taken under the bash that replays it.
+
+    The summary's @Ns counts from the load generator's start, while target and sent count from
+    run.sh's START, and CI runs log the same kill a second either side of its @Ns. So a target is
+    only ever compared with the sent second on its own clock, and a kill sent before its target
+    is refused, since on one clock that cannot happen."""
     path = pathlib.Path(run["path"]).with_name("kills.jsonl")
     if not (REPO / path).is_file():
         raise SystemExit(f"{path}: missing, so the kills of {run['path']} are not recorded")
     recorded = [json.loads(line) for line in (REPO / path).read_text().splitlines() if line.strip()]
     if [k["service"] for k in recorded] != re.findall(r"(\S+) @\d+s", run["kills"]):
         raise SystemExit(f"{path}: the victims differ from the kills line of {run['path']}")
-    return [{"service": k["service"], "landed": at, "target": k.get("target")}
-            for k, at in zip(recorded, kill_moments(run))]
+    timeline = []
+    for k, at in zip(recorded, kill_moments(run)):
+        target, sent = k.get("target"), k.get("sent")
+        if (target is None) != (sent is None):
+            raise SystemExit(f"{path}: {k['service']} records only one of target and sent, so its "
+                             "delay cannot be read on one clock; record the run again")
+        if target is not None and sent < target:
+            raise SystemExit(f"{path}: {k['service']} was sent at t+{sent} s, before its target "
+                             f"t+{target} s, so the two are not readings of one clock")
+        timeline.append({"service": k["service"], "landed": at, "target": target, "sent": sent})
+    return timeline
 
 
 def seeded_mix(run):
@@ -210,10 +225,15 @@ if len(drawn) != 1:
     raise SystemExit("only one of the two kill runs records the targets it drew; record both")
 if drawn.pop():
     targets = [", ".join(f't+{k["target"]} s' for k in kills) for kills in timelines.values()]
-    late = sorted(k["landed"] - k["target"] for kills in timelines.values() for k in kills)
+    # sent, not landed: landed is the summary's @Ns, which counts from the load generator's start
+    # rather than from the START the targets count from.
+    late = sorted(k["sent"] - k["target"] for kills in timelines.values() for k in kills)
     target_note = (f"The `kills.jsonl` beside each summary also records the targets the harness "
-                   f"drew: {targets[0]} in the first and {targets[1]} in the second.")
-    late_note = f", between {late[0]} s and {late[-1]} s after their targets"
+                   f"drew, {targets[0]} in the first and {targets[1]} in the second, and the second "
+                   f"it sent each kill. Both count from the harness's own start and the summaries "
+                   f"from the load generator's, so a target is compared only with the second its "
+                   f"kill was sent.")
+    late_note = f", and each was sent between {late[0]} s and {late[-1]} s after its target"
 else:
     target_note = ("The harness also writes the target it drew for each kill into the `kills.jsonl` "
                    "beside the summary, but these two runs were recorded before it did, so the "
