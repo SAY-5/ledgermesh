@@ -134,12 +134,19 @@ and from the kills themselves. Counters are snapshotted right before each kill b
 loses its in-memory meters. The last seven lines are the `/ops/overview` of each service read after
 the backlog drained.
 
-The seed fixes the load, and the kill schedule the harness draws from it. Replaying the draw
-sequence of [chaos/loadgen.py](chaos/loadgen.py) at seed 3 for the 1200 orders of this profile gives
-74 orders for `SKU-SCARCE` asking for 145 units, of which the 40 seeded units cover the first 21
-exactly, leaving 53 to be cancelled if the reservations arrive in the order they were submitted.
-Replaying the `$RANDOM` draws of [chaos/run.sh](chaos/run.sh) at the same seed gives
-inventory-service at t+15 s, order-service at t+32 s, payment-service at t+48 s.
+The seed fixes the load, and, under one bash, the kill schedule the harness draws from it. Replaying
+the draw sequence of [chaos/loadgen.py](chaos/loadgen.py) at seed 3 for the 1200 orders of this
+profile gives 74 orders for `SKU-SCARCE` asking for 145 units, of which the 40 seeded units cover
+the first 21 exactly, leaving 53 to be cancelled if the reservations arrive in the order they were
+submitted. The kill schedule is read from the runs instead of replayed, because
+[chaos/run.sh](chaos/run.sh) draws it with `$RANDOM`, and one seed gives a different sequence under
+the bash 3.2 that macOS ships than under the bash 5 of a Linux runner. The summaries record the
+kills each run made: [steady](chaos/evidence/steady/summary.txt) killed inventory-service at t+17 s,
+order-service at t+37 s, payment-service at t+52 s, and
+[steady-repeat](chaos/evidence/steady-repeat/summary.txt) killed inventory-service at t+16 s,
+order-service at t+33 s, payment-service at t+49 s. The harness also writes the target it drew for
+each kill into the `kills.jsonl` beside the summary, but these two runs were recorded before it did,
+so the section quotes where their kills landed rather than where they were drawn.
 
 The seed does not fix which orders land in which bucket. Three of these four runs cancel exactly
 that many, and the two three kill runs above ran the same load on the same host yet confirmed 1147
@@ -155,11 +162,11 @@ and 1148 orders, cancelling 53 and 52 for stock:
 Reservations reach the inventory service concurrently rather than in the order they were submitted,
 and 40 units cover one order more or one order fewer depending on which quantities arrive first, so
 the split moves by an order while the total does not. The moment a kill lands is not fixed either,
-because each kill waits for the service the previous one killed to report ready again: the six kills
-of those two runs landed between 1 s and 5 s after the targets drawn above. The latency lines, the
-retry, probe and breaker counts, and the duplicates the consumers ignore all move with whatever else
-the machine is doing. What repeats in all four runs: 1200 orders submitted, every one of them
-terminal, nothing cancelled for any reason other than stock, and no submission refused.
+because each kill waits for the service the previous one killed to report ready again: kill for
+kill, those two runs landed 1 s to 4 s apart. The latency lines, the retry, probe and breaker
+counts, and the duplicates the consumers ignore all move with whatever else the machine is doing.
+What repeats in all four runs: 1200 orders submitted, every one of them terminal, nothing cancelled
+for any reason other than stock, and no submission refused.
 
 Because of that, the gate on latency is a ceiling rather than an expected value: with
 `CHAOS_MAX_P95` set, the summary prints the ceiling and whether it held, and the harness exits non

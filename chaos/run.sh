@@ -101,9 +101,16 @@ for (( i=0; i<KILLS; i++ )); do
   victim=${victims[$(( RANDOM % ${#victims[@]} ))]}
   container="$PROJECT-$victim-1"
   $PY chaos/report.py snapshot "$victim" "$OUT/snapshots.jsonl" || true
-  log "killing $container at t+$(( SECONDS - START ))s"
+  sent=$(( SECONDS - START ))
+  log "killing $container at t+${sent}s"
   docker kill --signal=SIGKILL "$container" >/dev/null
-  printf '{"service":"%s","at":%s}\n' "$victim" "$($PY -c 'import time;print(time.time())')" >> "$OUT/kills.jsonl"
+  # target is the second this kill was drawn for and sent the second it went out, both counted from
+  # START like the log's t+, so sent - target compares two readings of one clock. at is the wall
+  # clock time after the kill; the summary's @Ns counts it from the load generator's own start,
+  # which is not START, so it is never compared with target. Recording the draw keeps the schedule
+  # readable without replaying $RANDOM, whose sequence for a seed differs between bash 3.2 and 5.
+  printf '{"service":"%s","target":%s,"sent":%s,"at":%s}\n' "$victim" "$target" "$sent" \
+    "$($PY -c 'import time;print(time.time())')" >> "$OUT/kills.jsonl"
   sleep "$RESTART_AFTER"
   log "restarting $container"
   docker start "$container" >/dev/null
