@@ -37,10 +37,12 @@ change the outcome of any order. This document explains the mechanisms that make
 | `order.payment_requested` | order | payment | the payment deadline passed; answer with the outcome on file or attempt now |
 
 Every topic has three partitions and every message is keyed by order id, so all events for one
-order are processed in sequence within a topic. Across topics they are not: each topic has a
-listener container and threads of its own, so one order's events on two topics can be handled at
-the same moment, and what both of them write has to hold up under that (the reservation ledger and
-the payment's two creators below).
+order are processed in sequence within a topic. Across topics they are not ordered. The inventory
+and payment services give each topic a listener container and threads of its own, so one order's
+events on two of their topics can be handled at the same moment, and what both of them write has
+to hold up under that (the reservation ledger and the payment's two creators below). The order
+service consumes its four topics in one container, `order-saga`, whose three consumer threads
+share the partitions of all four.
 
 ## Transactional outbox
 
