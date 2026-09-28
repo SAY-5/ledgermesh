@@ -25,10 +25,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
  * Creates orders and applies saga events. Every state change, the event it emits and the timeline
- * row that records it are written in one transaction through the outbox.
+ * row that records it are written in one transaction through the outbox. The change is counted and
+ * logged once that transaction has committed, so a change that rolls back, like the order of a call
+ * that lost the race for its idempotency key, is neither.
  */
 @Service
 public class OrderSagaService {
@@ -85,8 +89,12 @@ public class OrderSagaService {
     timeline.save(
         new OrderEvent(
             order.getId(), CREATED, null, OrderStatus.PENDING, null, correlationId, now));
-    metrics.transition(order.getStatus());
-    log.info("order {} created for {} amount {}", order.getId(), customerId, order.getAmount());
+    afterCommit(
+        () -> {
+          metrics.transition(OrderStatus.PENDING);
+          log.info(
+              "order {} created for {} amount {}", order.getId(), customerId, order.getAmount());
+        });
     return order;
   }
 
@@ -125,16 +133,20 @@ public class OrderSagaService {
     order.transition(t.to(), t.reason(), now, deadlineFor(t.to(), now));
     timeline.save(
         new OrderEvent(orderId, event.name(), from, t.to(), t.reason(), correlationId, now));
-    metrics.transition(t.to());
     if (t.releaseInventory()) {
       outbox.append(
           new OrderCancelled(
               UUID.randomUUID().toString(), orderId, correlationId, now, t.reason(), lines(order)));
     }
-    if (t.to().isTerminal()) {
-      metrics.completed(Duration.between(order.getCreatedAt(), now));
-    }
-    log.info("order {} moved to {} on {}", orderId, t.to(), event);
+    Duration elapsed = Duration.between(order.getCreatedAt(), now);
+    afterCommit(
+        () -> {
+          metrics.transition(t.to());
+          if (t.to().isTerminal()) {
+            metrics.completed(elapsed);
+          }
+          log.info("order {} moved to {} on {}", orderId, t.to(), event);
+        });
     return transition;
   }
 
@@ -170,13 +182,24 @@ public class OrderSagaService {
             null,
             order.getCorrelationId(),
             now));
-    metrics.redriven();
-    log.warn(
-        "order {} payment re-driven ({} of {})",
-        orderId,
-        order.getRedrives(),
-        timeouts.maxRedrives());
+    int redrives = order.getRedrives();
+    afterCommit(
+        () -> {
+          metrics.redriven();
+          log.warn(
+              "order {} payment re-driven ({} of {})", orderId, redrives, timeouts.maxRedrives());
+        });
     return true;
+  }
+
+  private static void afterCommit(Runnable action) {
+    TransactionSynchronizationManager.registerSynchronization(
+        new TransactionSynchronization() {
+          @Override
+          public void afterCommit() {
+            action.run();
+          }
+        });
   }
 
   private Instant deadlineFor(OrderStatus status, Instant now) {

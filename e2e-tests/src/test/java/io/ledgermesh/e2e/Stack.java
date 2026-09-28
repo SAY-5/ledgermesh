@@ -11,6 +11,7 @@ import java.math.BigDecimal;
 import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
+import java.net.http.HttpHeaders;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.sql.Connection;
@@ -185,9 +186,10 @@ public final class Stack {
         .asText();
   }
 
-  static JsonNode createOrder(
+  /** Places an order under an idempotency key; the reply says whether it was a replay. */
+  static Reply createOrder(
       String idempotencyKey, String customer, String sku, int quantity, BigDecimal unitPrice) {
-    return send(
+    return exchange(
         "POST",
         ordersUrl(),
         orderBody(customer, sku, quantity, unitPrice),
@@ -231,7 +233,19 @@ public final class Stack {
     return send("GET", "http://localhost:" + orderPort + "/stock/" + sku, null);
   }
 
+  /** Status, headers and body of a response, for a test that checks more than the body. */
+  record Reply(int status, HttpHeaders headers, JsonNode body) {
+
+    String header(String name) {
+      return headers.firstValue(name).orElse(null);
+    }
+  }
+
   static JsonNode send(String method, String url, String body, String... headers) {
+    return exchange(method, url, body, headers).body();
+  }
+
+  static Reply exchange(String method, String url, String body, String... headers) {
     HttpRequest.Builder request = HttpRequest.newBuilder(URI.create(url));
     if (headers.length > 0) {
       request.headers(headers);
@@ -250,7 +264,7 @@ public final class Stack {
         throw new IllegalStateException(
             method + " " + url + " -> " + response.statusCode() + " " + response.body());
       }
-      return JSON.readTree(response.body());
+      return new Reply(response.statusCode(), response.headers(), JSON.readTree(response.body()));
     } catch (IOException e) {
       throw new UncheckedIOException(e);
     } catch (InterruptedException e) {

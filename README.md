@@ -191,18 +191,20 @@ the stack down on every exit path unless `CHAOS_KEEP_STACK=1`.
 
 ```bash
 make lint     # spotless (google-java-format)
-make test     # mvn verify: 89 unit tests + 14 integration tests
+make test     # mvn verify: 94 unit tests + 16 integration tests
 ```
 
 Unit tests (H2, no Docker): saga state machine transitions and compensation, deadline reaper
 (silent reservation cancelled with release, silent payment re-driven once then cancelled), the
 timeline endpoint, outbox relay ordering and re-send behaviour, idempotent consumer, breaker and
 time limiter fallbacks, cache write-through after commit, atomic and concurrent reservations,
-retry / breaker / deferred queue, re-drive answers, deterministic processor, the replay cap that
-turns a record into a parked poison message, the replayer committing only the offsets it handled
-and waiting for its group assignment before it treats silence as an empty topic, the request
-deduplication store, the relay counting a send that never confirmed, the open and overdue saga
-counts behind the ops overview, and the reservation ledger (a release credits what the order held,
+retry / breaker / deferred queue, re-drive answers, the two creators of one payment racing (the
+second fails on the primary key before it calls the processor, and its redelivery takes the payment
+on file), deterministic processor, the replay cap that turns a record into a parked poison message,
+the replayer committing only the offsets it handled and waiting for its group assignment before it
+treats silence as an empty topic, the request deduplication store, the relay counting a send that
+never confirmed, the open and overdue saga counts behind the ops overview, saga metrics and log
+lines that wait for the commit, and the reservation ledger (a release credits what the order held,
 a release before the reservation is a no-op that blocks the late reservation, a repeated
 reservation takes stock once).
 
@@ -214,13 +216,16 @@ orders in flight confirms all of them, and a record that can never be processed 
 letter topic after the configured attempts without holding up the record behind it, is replayed
 once, is parked on the second replay and is then listed by `GET /admin/dlq/parked` with its replay
 count and original coordinates. A release that reaches inventory before the reservation it undoes
-leaves stock untouched and the late reservation is rejected. Exactly once at the boundary has a class of its own: the
-same idempotency key twice, two calls racing on one key (left to chance, and with the second held
-until the first has committed), and the same key retried across a restart
-of the order service each place one order and return one body, and an outbox row put back into the
-crash window is sent again, ignored by the consumer, and leaves the stock ledger and the payment
-unchanged. All three services boot in one JVM and therefore share one classpath, so the order and payment
-contexts exclude the Redis auto-configuration that only the inventory service needs; without that
+leaves stock untouched and the late reservation is rejected. Exactly once at the boundary has a
+class of its own. The same idempotency key twice, two calls racing on one key, a second call whose
+answer has to wait on the key until the first call commits, and the same key retried across a
+restart of the order service each place one order and return one body, and every answer but the
+first carries `Idempotent-Replay: true`. A second call held in its work until the first has
+committed fails on the key and takes its order down with it, so the key still stands for one
+order. An outbox row put back into the crash window is sent again, ignored by the consumer, and
+leaves the stock ledger and the payment unchanged. All three services boot in one JVM and
+therefore share one classpath, so the order and payment contexts exclude the Redis
+auto-configuration that only the inventory service needs; without that
 their health endpoints try to reach a Redis on localhost, readiness never turns UP and every saga
 assertion times out. The ops overview is checked against a listener that is
 stopped and started again: lag rises and falls, the order shows up as in flight and then does not,
@@ -301,9 +306,14 @@ startup by the first service up.
    self-check, with `web/dist` kept as an artifact.
 
 `.github/workflows/ci.yml` mirrors the same four jobs. `.github/workflows/repeat.yml` runs one
-integration test class 50 times, each run in a fresh JVM against fresh containers, and fails if
-any run failed: every pull request that changes the idempotency code gets it for `ExactlyOnceIT`,
-and `gh workflow run repeat.yml --ref <branch> -f test=<class> -f runs=<n>` starts it by hand.
+integration test class 50 times over five runners, each run in a fresh JVM against fresh
+containers, in about seven minutes of wall time; a runner with a failed run fails its job, and the
+summary job counts the failed runs. It runs `ExactlyOnceIT` on every push to a pull request that
+touches the exactly once code, the saga service, the order service's configuration, the test stack
+or the root `pom.xml`, whose Spring Data and Hibernate versions decide whether a save inserts or
+merges. It is not a required check (`main` has no branch protection), so a red run has to be read
+before merging, and `gh workflow run repeat.yml --ref <branch> -f test=<class> -f runs=<n>` starts
+it by hand.
 
 ## Saga deadlines
 
