@@ -67,10 +67,14 @@ function blobCommit(path, raw) {
         "`npm run measured`, so the link resolves to the text these figures were read from",
     );
   }
-  // Every commit that adds or removes the blob at this path, newest first. The ones whose tree
-  // holds it introduced it; the last of those introduced it first.
+  // One hash per line, newest first, for each commit whose diff at this path (against its first
+  // parent, for a merge) adds or removes the blob. `--diff-merges=first-parent` also turns on the
+  // patch of every commit it lists, so without `--no-patch` each line of those patches would come
+  // back here as a commit to look up. The ones whose tree holds the blob introduced it; the last of
+  // those introduced it first.
   const introduced = git([
-    "log", "--format=%H", "--diff-merges=first-parent", `--find-object=${blob}`, "--", path,
+    "log", "--format=%H", "--diff-merges=first-parent", "--no-patch", `--find-object=${blob}`,
+    "--", path,
   ])
     .split("\n")
     .filter((commit) => commit && blobAt(commit, path) === blob);
