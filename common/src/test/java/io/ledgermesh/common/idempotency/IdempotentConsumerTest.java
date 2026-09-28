@@ -3,8 +3,11 @@ package io.ledgermesh.common.idempotency;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import io.ledgermesh.common.outbox.OutboxEvent;
+import io.ledgermesh.common.outbox.OutboxEventRepository;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.time.Clock;
+import java.time.Instant;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -34,6 +37,7 @@ class IdempotentConsumerTest {
 
   @Autowired private IdempotentConsumer consumer;
   @Autowired private ProcessedEventRepository repository;
+  @Autowired private OutboxEventRepository outbox;
 
   @Test
   void runsWorkOnceForAnEventId() {
@@ -79,7 +83,7 @@ class IdempotentConsumerTest {
     CountDownLatch firstCommitted = new CountDownLatch(1);
     ExecutorService pool = Executors.newSingleThreadExecutor();
     try {
-      // found no marker, then held in its work until the other delivery committed
+      // found no marker, wrote its effect, then held in its work until the other delivery committed
       Future<Boolean> late =
           pool.submit(
               () ->
@@ -87,19 +91,30 @@ class IdempotentConsumerTest {
                       "inventory",
                       "evt-4",
                       () -> {
+                        effect("evt-4-late");
                         checked.countDown();
                         waitFor(firstCommitted);
                       }));
       assertThat(checked.await(10, TimeUnit.SECONDS)).isTrue();
-      assertThat(consumer.once("inventory", "evt-4", () -> {})).isTrue();
+      assertThat(consumer.once("inventory", "evt-4", () -> effect("evt-4-first"))).isTrue();
       firstCommitted.countDown();
 
       assertThatThrownBy(() -> late.get(10, TimeUnit.SECONDS))
           .hasCauseInstanceOf(DataIntegrityViolationException.class);
+      assertThat(outbox.findAll())
+          .extracting(OutboxEvent::getEventId)
+          .contains("evt-4-first")
+          .doesNotContain("evt-4-late");
       assertThat(consumer.once("inventory", "evt-4", () -> {})).isFalse();
     } finally {
       pool.shutdownNow();
     }
+  }
+
+  /** Written in the delivery's transaction, so its rollback removes the row again. */
+  private void effect(String eventId) {
+    outbox.save(
+        new OutboxEvent(eventId, "test.effects", "order-4", "Effect", "c", "{}", Instant.now()));
   }
 
   private static void waitFor(CountDownLatch latch) {
