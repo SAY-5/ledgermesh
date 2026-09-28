@@ -13,14 +13,22 @@ import io.ledgermesh.order.domain.OrderItem;
 import io.ledgermesh.order.domain.OrderRepository;
 import io.ledgermesh.order.domain.OrderStatus;
 import io.ledgermesh.order.domain.SagaEvent;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @SpringBootTest
+@ExtendWith(OutputCaptureExtension.class)
 class OrderSagaServiceTest {
 
   @Autowired private OrderSagaService saga;
@@ -28,6 +36,8 @@ class OrderSagaServiceTest {
   @Autowired private OutboxEventRepository outbox;
   @Autowired private OrderEventRepository timeline;
   @Autowired private IdempotentConsumer idempotent;
+  @Autowired private TransactionTemplate tx;
+  @Autowired private MeterRegistry meters;
 
   @BeforeEach
   void clean() {
@@ -131,5 +141,43 @@ class OrderSagaServiceTest {
     assertThat(events.get(3).getCorrelationId()).isEqualTo("c-3");
     assertThat(events).allSatisfy(e -> assertThat(e.getOccurredAt()).isNotNull());
     assertThat(orders.findById(order.getId()).orElseThrow().getDeadlineAt()).isNull();
+  }
+
+  @Test
+  void aChangeThatRollsBackIsNeitherCountedNorLogged(CapturedOutput output) {
+    List<OrderItem> items = List.of(new OrderItem("sku-1", 1, new BigDecimal("5.00")));
+    double created = transitions(OrderStatus.PENDING);
+    double reserved = transitions(OrderStatus.RESERVED);
+    AtomicReference<String> rolledBack = new AtomicReference<>();
+
+    // rolled back after the order was placed and reserved, the way the loser of a race on one
+    // idempotency key rolls back the order it placed
+    tx.executeWithoutResult(
+        status -> {
+          Order order = saga.create("cust-rolled-back", items);
+          saga.apply(order.getId(), SagaEvent.INVENTORY_RESERVED, "c");
+          rolledBack.set(order.getId());
+          status.setRollbackOnly();
+        });
+
+    assertThat(orders.count()).isZero();
+    assertThat(transitions(OrderStatus.PENDING)).isEqualTo(created);
+    assertThat(transitions(OrderStatus.RESERVED)).isEqualTo(reserved);
+    assertThat(output).doesNotContain("order " + rolledBack.get());
+
+    Order kept = saga.create("cust-committed", items);
+    saga.apply(kept.getId(), SagaEvent.INVENTORY_RESERVED, "c");
+
+    assertThat(transitions(OrderStatus.PENDING)).isEqualTo(created + 1);
+    assertThat(transitions(OrderStatus.RESERVED)).isEqualTo(reserved + 1);
+    assertThat(output)
+        .contains("order " + kept.getId() + " created for cust-committed")
+        .contains("order " + kept.getId() + " moved to RESERVED");
+  }
+
+  private double transitions(OrderStatus to) {
+    Counter counter =
+        meters.find("ledgermesh.orders.transitions").tag("to", to.name()).counter();
+    return counter == null ? 0 : counter.count();
   }
 }
