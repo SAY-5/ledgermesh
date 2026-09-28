@@ -208,7 +208,8 @@ letter topic after the configured attempts without holding up the record behind 
 once, is parked on the second replay and is then listed by `GET /admin/dlq/parked` with its replay
 count and original coordinates. A release that reaches inventory before the reservation it undoes
 leaves stock untouched and the late reservation is rejected. Exactly once at the boundary has a class of its own: the
-same idempotency key twice, two calls racing on one key, and the same key retried across a restart
+same idempotency key twice, two calls racing on one key (left to chance, and with the second held
+until the first has committed), and the same key retried across a restart
 of the order service each place one order and return one body, and an outbox row put back into the
 crash window is sent again, ignored by the consumer, and leaves the stock ledger and the payment
 unchanged. All three services boot in one JVM and therefore share one classpath, so the order and payment
@@ -292,7 +293,10 @@ startup by the first service up.
 4. **web**: `npm ci`, the two generator checks, the production bundle and the simulation's
    self-check, with `web/dist` kept as an artifact.
 
-`.github/workflows/ci.yml` mirrors the same four jobs.
+`.github/workflows/ci.yml` mirrors the same four jobs. `.github/workflows/repeat.yml` runs one
+integration test class 50 times, each run in a fresh JVM against fresh containers, and fails if
+any run failed: every pull request that changes the idempotency code gets it for `ExactlyOnceIT`,
+and `gh workflow run repeat.yml --ref <branch> -f test=<class> -f runs=<n>` starts it by hand.
 
 ## Saga deadlines
 

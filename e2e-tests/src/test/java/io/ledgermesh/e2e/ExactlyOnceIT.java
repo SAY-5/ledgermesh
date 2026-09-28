@@ -1,11 +1,17 @@
 package io.ledgermesh.e2e;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.ledgermesh.common.idempotency.RequestDeduplicator;
+import io.ledgermesh.common.idempotency.RequestDeduplicator.Outcome;
 import io.ledgermesh.inventory.stock.StockItem;
 import io.ledgermesh.inventory.stock.StockRepository;
+import io.ledgermesh.order.api.OrderResponse;
+import io.ledgermesh.order.domain.OrderItem;
+import io.ledgermesh.order.saga.OrderSagaService;
 import io.ledgermesh.payment.domain.Payment;
 import io.ledgermesh.payment.domain.PaymentRepository;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -13,15 +19,21 @@ import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.DataIntegrityViolationException;
 
 class ExactlyOnceIT {
 
@@ -59,9 +71,52 @@ class ExactlyOnceIT {
       JsonNode second = answers.get(1).get();
 
       assertThat(second).isEqualTo(first);
+      assertThat(ordersOf("cust-race")).isEqualTo(1);
       String id = first.get("id").asText();
       await().atMost(TIMEOUT).until(() -> Stack.orderStatus(id).equals("CONFIRMED"));
       assertThat(Stack.stock("E2E-RACE")).isEqualTo(38);
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  @Test
+  void aRequestThatStoresItsAnswerAfterTheFirstCommittedPlacesNoSecondOrder() throws Exception {
+    Stack.putStock("E2E-RACE-LATE", 40);
+    String key = UUID.randomUUID().toString();
+    RequestDeduplicator requests = Stack.order.getBean(RequestDeduplicator.class);
+    OrderSagaService saga = Stack.order.getBean(OrderSagaService.class);
+    Supplier<OrderResponse> place =
+        () ->
+            OrderResponse.from(
+                saga.create("cust-race-late", List.of(new OrderItem("E2E-RACE-LATE", 2, PRICE))));
+    CountDownLatch lookedUp = new CountDownLatch(1);
+    CountDownLatch firstCommitted = new CountDownLatch(1);
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    try {
+      // the interleaving the race above only sometimes hits: this request found no answer for the
+      // key and is held in its work until the first one has committed its order and its answer
+      Future<Outcome<OrderResponse>> late =
+          pool.submit(
+              () ->
+                  requests.once(
+                      key,
+                      OrderResponse.class,
+                      () -> {
+                        lookedUp.countDown();
+                        waitFor(firstCommitted);
+                        return place.get();
+                      }));
+      assertThat(lookedUp.await(10, TimeUnit.SECONDS)).isTrue();
+      OrderResponse first = requests.once(key, OrderResponse.class, place).body();
+      firstCommitted.countDown();
+
+      assertThatThrownBy(() -> late.get(10, TimeUnit.SECONDS))
+          .hasCauseInstanceOf(DataIntegrityViolationException.class);
+      assertThat(requests.stored(key, OrderResponse.class)).contains(first);
+      assertThat(ordersOf("cust-race-late")).isEqualTo(1);
+      await().atMost(TIMEOUT).until(() -> Stack.orderStatus(first.id()).equals("CONFIRMED"));
+      assertThat(Stack.stock("E2E-RACE-LATE")).isEqualTo(38);
     } finally {
       pool.shutdownNow();
     }
@@ -128,6 +183,33 @@ class ExactlyOnceIT {
 
   private static Payment payment(String orderId) {
     return Stack.payment.getBean(PaymentRepository.class).findById(orderId).orElseThrow();
+  }
+
+  private static int ordersOf(String customer) {
+    try (Connection connection =
+            DriverManager.getConnection(
+                Stack.jdbcUrl("orders"),
+                Stack.POSTGRES.getUsername(),
+                Stack.POSTGRES.getPassword());
+        PreparedStatement statement =
+            connection.prepareStatement("select count(*) from orders where customer_id = ?")) {
+      statement.setString(1, customer);
+      try (ResultSet rows = statement.executeQuery()) {
+        rows.next();
+        return rows.getInt(1);
+      }
+    } catch (SQLException e) {
+      throw new IllegalStateException("could not count the orders of " + customer, e);
+    }
+  }
+
+  private static void waitFor(CountDownLatch latch) {
+    try {
+      assertThat(latch.await(10, TimeUnit.SECONDS)).isTrue();
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new IllegalStateException(e);
+    }
   }
 
   private static int unpublish(String orderId) {

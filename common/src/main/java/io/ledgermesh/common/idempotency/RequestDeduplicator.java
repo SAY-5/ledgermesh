@@ -16,8 +16,10 @@ import org.springframework.transaction.annotation.Transactional;
 /**
  * Runs an inbound request once per idempotency key. The stored answer and the work share one
  * transaction, so a client that retries a request it never saw the answer to gets the first answer
- * back instead of a second effect. Two requests racing on one key both try to store the answer; the
- * primary key lets exactly one of them through and the loser reads what the winner wrote.
+ * back instead of a second effect. Two requests racing on one key both try to insert the answer;
+ * the primary key lets exactly one of them through, whether the other is still in flight (the
+ * insert waits for it) or already committed, and the loser rolls its work back and reads what the
+ * winner wrote.
  */
 @Component
 public class RequestDeduplicator {
