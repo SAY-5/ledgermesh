@@ -277,13 +277,15 @@ public class OrderSagaService {
   }
 
   /**
-   * Up to {@code max} cancelled orders whose cancellation was never answered, oldest first,
-   * including ones cancelled before the order service waited for answers at all.
+   * Up to {@code max} cancelled orders whose cancellation was never answered and that are not
+   * waiting for an answer, oldest first: orders cancelled before the order service waited for
+   * answers at all. Sending one again makes it wait, so it is not returned twice; the ones already
+   * waiting are the reaper's.
    */
   @Transactional(readOnly = true)
   public List<String> unansweredCancellations(int max) {
     return orders
-        .findByStatusAndReasonInAndCompensatedAtIsNullOrderByUpdatedAtAsc(
+        .findByStatusAndReasonInAndCompensatedAtIsNullAndCompensationDueAtIsNullOrderByUpdatedAtAsc(
             OrderStatus.CANCELLED, OrderStateMachine.COMPENSATED, PageRequest.of(0, max))
         .stream()
         .map(Order::getId)

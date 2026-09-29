@@ -24,7 +24,11 @@ public interface OrderRepository extends JpaRepository<Order, String> {
 
   long countByCompensatedAtIsNullAndCompensationDueAtLessThanEqual(Instant now);
 
-  /** Orders cancelled for one of these reasons whose cancellation was never answered. */
-  List<Order> findByStatusAndReasonInAndCompensatedAtIsNullOrderByUpdatedAtAsc(
-      OrderStatus status, Collection<String> reasons, Pageable page);
+  /**
+   * Orders cancelled for one of these reasons whose cancellation was never answered and is not
+   * waiting for an answer either: cancelled before the order service waited for answers.
+   */
+  List<Order>
+      findByStatusAndReasonInAndCompensatedAtIsNullAndCompensationDueAtIsNullOrderByUpdatedAtAsc(
+          OrderStatus status, Collection<String> reasons, Pageable page);
 }
