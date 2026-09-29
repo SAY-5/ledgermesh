@@ -56,9 +56,11 @@ class ReservationTimeoutIT {
     await().atMost(TIMEOUT).until(() -> Stack.stock(SKU) == 10);
     await().atMost(TIMEOUT).until(() -> paymentStatus(id).equals("VOIDED"));
 
-    // the answers the listener had not read arrive after the cancellation and change nothing
-    await().atMost(TIMEOUT).until(() -> ignored(id, "PAYMENT_COMPLETED"));
-    assertThat(ignored(id, "INVENTORY_RESERVED")).isTrue();
+    // the answers the listener had not read arrive after the cancellation and change nothing; they
+    // come on two topics, so either may be applied first
+    await()
+        .atMost(TIMEOUT)
+        .until(() -> ignored(id, "INVENTORY_RESERVED") && ignored(id, "PAYMENT_COMPLETED"));
     assertThat(Stack.orderStatus(id)).isEqualTo("CANCELLED");
     assertThat(paymentStatus(id)).isEqualTo("VOIDED");
     assertThat(Stack.stock(SKU)).isEqualTo(10);
