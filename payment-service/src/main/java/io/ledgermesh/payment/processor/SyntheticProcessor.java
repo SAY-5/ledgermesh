@@ -5,8 +5,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.stereotype.Component;
+import java.util.UUID;
 
 /**
  * Deterministic stand-in for a card network. Outcomes depend only on the inputs, so a run is
@@ -18,13 +17,13 @@ import org.springframework.stereotype.Component;
  *   <li>a smaller share of first attempts hangs past the time limit
  * </ul>
  *
- * <p>Every approval is recorded as an outstanding authorization in {@link AuthorizationHolds}
- * before it is returned, and stays outstanding until {@link #release} gives it back, so a run can
- * check that no card is left holding money for an order that was not confirmed. An approval whose
- * caller stopped waiting (the time limiter cut it off) is outstanding all the same, as it would be
- * at a real processor.
+ * <p>Every approval is a new authorization under a code of its own, recorded as outstanding in
+ * {@link AuthorizationHolds} before it is returned, and stays outstanding until {@link #release}
+ * gives it back, so a run can check that no card is left holding money for an order that was not
+ * confirmed, and that a confirmed one is held once. An approval whose caller stopped waiting (the
+ * time limiter cut it off) is outstanding all the same, as it would be at a real processor. Which
+ * attempts approve, fail or hang depends only on the inputs; the codes do not.
  */
-@Component
 public class SyntheticProcessor implements PaymentProcessor {
 
   private final BigDecimal limit;
@@ -34,10 +33,10 @@ public class SyntheticProcessor implements PaymentProcessor {
   private final AuthorizationHolds holds;
 
   public SyntheticProcessor(
-      @Value("${ledgermesh.processor.limit:10000}") BigDecimal limit,
-      @Value("${ledgermesh.processor.transient-percent:5}") int transientPercent,
-      @Value("${ledgermesh.processor.slow-percent:1}") int slowPercent,
-      @Value("${ledgermesh.processor.slow-millis:3000}") long slowMillis,
+      BigDecimal limit,
+      int transientPercent,
+      int slowPercent,
+      long slowMillis,
       AuthorizationHolds holds) {
     this.limit = limit;
     this.transientPercent = transientPercent;
@@ -61,14 +60,15 @@ public class SyntheticProcessor implements PaymentProcessor {
     if (bucket < transientPercent + slowPercent) {
       sleep(slowMillis);
     }
-    String code = "AUTH-" + digest(orderId).substring(0, 12).toUpperCase();
+    String code =
+        "AUTH-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16).toUpperCase();
     holds.grant(orderId, code, amount);
     return new Approved(code);
   }
 
   @Override
-  public int release(String orderId) {
-    return holds.release(orderId);
+  public int release(String orderId, String keep) {
+    return holds.release(orderId, keep);
   }
 
   static int bucket(String input) {

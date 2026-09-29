@@ -26,10 +26,12 @@ class SyntheticProcessorTest {
   }
 
   @Test
-  void approvalCodeIsStableForAnOrder() {
-    String first = firstApproval("order-stable");
+  void everyApprovalIsANewAuthorizationWithACodeOfItsOwn() {
+    String first = firstApproval("order-twice");
+    String second = firstApproval("order-twice");
     assertThat(first).startsWith("AUTH-");
-    assertThat(firstApproval("order-stable")).isEqualTo(first);
+    assertThat(second).startsWith("AUTH-").isNotEqualTo(first);
+    assertThat(holds.outstanding("order-twice")).isEqualTo(2);
   }
 
   @Test
@@ -70,23 +72,26 @@ class SyntheticProcessorTest {
   }
 
   @Test
-  void anApprovalStaysOutstandingUntilItsOrderIsReleased() {
+  void anApprovalStaysOutstandingUntilItsOrderIsReleasedButTheOneKept() {
     processor.authorize("o-held", "cust-declined", BigDecimal.ONE, 1);
     assertThat(holds.outstanding("o-held")).isZero();
 
-    String code = firstApproval("o-held");
+    String kept = firstApproval("o-held");
     firstApproval("o-held");
-    assertThat(holds.outstanding("o-held")).isEqualTo(1);
-    assertThat(holds.codes).containsEntry(code, "o-held");
+    assertThat(holds.outstanding("o-held")).isEqualTo(2);
 
-    assertThat(processor.release("o-held")).isEqualTo(1);
-    assertThat(processor.release("o-held")).isZero();
+    assertThat(processor.release("o-held", kept)).isEqualTo(1);
+    assertThat(processor.release("o-held", kept)).isZero();
+    assertThat(holds.outstanding("o-held")).isEqualTo(1);
+    assertThat(holds.open).containsEntry(kept, true);
+
+    assertThat(processor.release("o-held", null)).isEqualTo(1);
     assertThat(holds.outstanding("o-held")).isZero();
 
     // an approval that lands after the release is a new hold on the card, and needs its own
     firstApproval("o-held");
     assertThat(holds.outstanding("o-held")).isEqualTo(1);
-    assertThat(processor.release("o-held")).isEqualTo(1);
+    assertThat(processor.release("o-held", null)).isEqualTo(1);
   }
 
   private String firstApproval(String orderId) {
@@ -109,15 +114,19 @@ class SyntheticProcessorTest {
 
     @Override
     public void grant(String orderId, String authorizationCode, BigDecimal amount) {
-      codes.put(authorizationCode, orderId);
+      if (codes.putIfAbsent(authorizationCode, orderId) != null) {
+        throw new IllegalStateException("code granted twice: " + authorizationCode);
+      }
       open.put(authorizationCode, true);
     }
 
     @Override
-    public int release(String orderId) {
+    public int release(String orderId, String keep) {
       int released = 0;
       for (Map.Entry<String, String> hold : codes.entrySet()) {
-        if (hold.getValue().equals(orderId) && open.get(hold.getKey())) {
+        if (hold.getValue().equals(orderId)
+            && open.get(hold.getKey())
+            && !hold.getKey().equals(keep)) {
           open.put(hold.getKey(), false);
           released++;
         }

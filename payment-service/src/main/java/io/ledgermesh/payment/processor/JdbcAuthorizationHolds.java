@@ -3,20 +3,18 @@ package io.ledgermesh.payment.processor;
 import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.Clock;
-import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
- * Keeps the synthetic processor's authorizations in a {@code processor_hold} table of their own.
- * Every write commits in a transaction of its own, whatever the caller is in the middle of, so what
- * the processor granted stays granted when the payment service's transaction rolls back or its
- * process is killed, as it would at a real processor.
+ * Keeps the synthetic processor's authorizations in a {@code processor_hold} table of their own,
+ * one row per authorization. Every write commits in a transaction of its own, whatever the caller
+ * is in the middle of, so what the processor granted stays granted when the payment service's
+ * transaction rolls back or its process is killed, as it would at a real processor. Created only
+ * with the synthetic processor, by {@link SyntheticProcessorConfiguration}.
  */
-@Component
 public class JdbcAuthorizationHolds implements AuthorizationHolds {
 
   public static final String OUTSTANDING = "OUTSTANDING";
@@ -45,55 +43,32 @@ public class JdbcAuthorizationHolds implements AuthorizationHolds {
 
   @Override
   public void grant(String orderId, String authorizationCode, BigDecimal amount) {
-    if (reopen(orderId, authorizationCode, amount) > 0) {
-      return;
-    }
-    try {
-      own.executeWithoutResult(
-          status ->
-              jdbc.update(
-                  "insert into processor_hold"
-                      + " (authorization_code, order_id, amount, state, granted_at)"
-                      + " values (?, ?, ?, ?, ?)",
-                  authorizationCode,
-                  orderId,
-                  amount,
-                  OUTSTANDING,
-                  Timestamp.from(clock.instant())));
-    } catch (DuplicateKeyException raced) {
-      // another grant of the same code inserted it first; make sure it stands as outstanding
-      reopen(orderId, authorizationCode, amount);
-    }
-  }
-
-  /** Marks an existing hold with this code outstanding again; returns how many rows it touched. */
-  private int reopen(String orderId, String authorizationCode, BigDecimal amount) {
-    Integer updated =
-        own.execute(
-            status ->
-                jdbc.update(
-                    "update processor_hold set order_id = ?, amount = ?, state = ?, granted_at = ?,"
-                        + " released_at = null where authorization_code = ?",
-                    orderId,
-                    amount,
-                    OUTSTANDING,
-                    Timestamp.from(clock.instant()),
-                    authorizationCode));
-    return updated == null ? 0 : updated;
+    own.executeWithoutResult(
+        status ->
+            jdbc.update(
+                "insert into processor_hold"
+                    + " (authorization_code, order_id, amount, state, granted_at)"
+                    + " values (?, ?, ?, ?, ?)",
+                authorizationCode,
+                orderId,
+                amount,
+                OUTSTANDING,
+                Timestamp.from(clock.instant())));
   }
 
   @Override
-  public int release(String orderId) {
+  public int release(String orderId, String keep) {
     Integer released =
         own.execute(
             status ->
                 jdbc.update(
                     "update processor_hold set state = ?, released_at = ?"
-                        + " where order_id = ? and state = ?",
+                        + " where order_id = ? and state = ? and authorization_code <> ?",
                     RELEASED,
                     Timestamp.from(clock.instant()),
                     orderId,
-                    OUTSTANDING));
+                    OUTSTANDING,
+                    keep == null ? "" : keep));
     return released == null ? 0 : released;
   }
 

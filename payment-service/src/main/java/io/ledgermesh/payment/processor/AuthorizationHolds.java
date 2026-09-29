@@ -8,11 +8,14 @@ import java.math.BigDecimal;
  */
 public interface AuthorizationHolds {
 
-  /** Records an authorization as outstanding; granting the same code again keeps one hold. */
+  /** Records a new outstanding authorization under its own code. */
   void grant(String orderId, String authorizationCode, BigDecimal amount);
 
-  /** Releases every outstanding authorization of the order; returns how many were released. */
-  int release(String orderId);
+  /**
+   * Releases every outstanding authorization of the order but the one whose code is {@code keep}
+   * (none when null); returns how many were released.
+   */
+  int release(String orderId, String keep);
 
   /** How many authorizations of the order are outstanding. */
   int outstanding(String orderId);
