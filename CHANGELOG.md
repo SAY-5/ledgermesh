@@ -5,6 +5,24 @@ see the versioning note in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Unreleased
 
+* An order cancelled at a saga deadline kept the payment authorized for it. The payment service
+  authorizes off `inventory.reserved` whatever the order has become since, and only inventory read
+  `order.cancelled`, so the stock came back and the money did not. Killing the order service more
+  than once can use up an order's 60 s reservation window, since the deadline counts the order
+  service's own absences: the chaos job of run 36519954920 (seed 54826) ended with four orders
+  cancelled for `RESERVATION_TIMEOUT`, and seed 1040, run with the final ledger kept, showed six
+  such orders with their stock released and their payments still `AUTHORIZED`. The payment service
+  now reads `order.cancelled` and voids an authorized or open payment, or inserts a voided marker
+  when the cancellation comes first, so a late reservation or re-drive charges nothing. Its new
+  consumer group starts from the beginning of `order.cancelled`, so its first start also voids
+  payments left authorized for orders cancelled before it.
+* The chaos harness reads every order, its timeline, its payment and its stock holds from the three
+  databases into `chaos/out/final.json`, and fails a run whose ledger breaks a money or stock rule:
+  a confirmed order paid once and holding its stock, a cancelled one charged nothing and holding
+  nothing. A cancellation for a saga deadline is counted under `cancelled (deadline)` with its
+  reason instead of under `failed / stuck`, and every order that was not confirmed or cancelled for
+  stock is listed with its payment, holds and timeline. The GitHub chaos job takes a `chaos_seeds`
+  input when started by hand and runs one job per seed listed.
 * Two calls racing on one `Idempotency-Key` could both place an order. The answer was saved with a
   merge, which reads the row first: a call that stored its answer after the other had committed
   found that row and overwrote it instead of failing on the primary key, and both orders were
