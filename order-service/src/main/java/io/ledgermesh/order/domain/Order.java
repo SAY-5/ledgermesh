@@ -63,6 +63,15 @@ public class Order {
   private int redrives;
 
   /**
+   * When {@code order.cancelled} is sent again unless the payment service has answered it by then;
+   * null when no cancellation is waiting for an answer.
+   */
+  private Instant compensationDueAt;
+
+  /** When the payment service answered the cancellation with {@code payment.voided}. */
+  private Instant compensatedAt;
+
+  /**
    * Null until the order is inserted. The id is assigned, so the version is how the repository
    * tells a new order from a stored one; a primitive one would make it merge a new order, reading
    * the row before inserting it.
@@ -96,6 +105,17 @@ public class Order {
     this.reason = reason;
     this.updatedAt = now;
     this.deadlineAt = deadlineAt;
+  }
+
+  /** Waits for the payment service to answer the cancellation, sent again at {@code due}. */
+  public void awaitCompensation(Instant due) {
+    this.compensationDueAt = due;
+  }
+
+  /** The payment service answered the cancellation: nothing is charged for the order. */
+  public void compensated(Instant now) {
+    this.compensatedAt = now;
+    this.compensationDueAt = null;
   }
 
   /** Extends the current step's deadline after a re-drive was requested. */
@@ -147,5 +167,13 @@ public class Order {
 
   public int getRedrives() {
     return redrives;
+  }
+
+  public Instant getCompensationDueAt() {
+    return compensationDueAt;
+  }
+
+  public Instant getCompensatedAt() {
+    return compensatedAt;
   }
 }

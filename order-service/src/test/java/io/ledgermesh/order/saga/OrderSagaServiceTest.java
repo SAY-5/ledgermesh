@@ -98,6 +98,39 @@ class OrderSagaServiceTest {
   }
 
   @Test
+  void aCancellationWaitsForThePaymentServiceToAnswerItOnce() {
+    Order order = saga.create("cust-1", List.of(new OrderItem("sku-1", 1, new BigDecimal("5.00"))));
+    saga.apply(order.getId(), SagaEvent.INVENTORY_RESERVED, "c");
+    saga.apply(order.getId(), SagaEvent.PAYMENT_FAILED, "c");
+    Order cancelled = orders.findById(order.getId()).orElseThrow();
+    assertThat(cancelled.getCompensationDueAt())
+        .isEqualTo(cancelled.getUpdatedAt().plusSeconds(60));
+    assertThat(cancelled.getCompensatedAt()).isNull();
+
+    assertThat(saga.compensated(order.getId(), "DECLINED", "c-1")).isTrue();
+    assertThat(saga.compensated(order.getId(), "DECLINED", "c-2")).isFalse();
+
+    Order answered = orders.findById(order.getId()).orElseThrow();
+    assertThat(answered.getCompensatedAt()).isNotNull();
+    assertThat(answered.getCompensationDueAt()).isNull();
+    assertThat(saga.resendCancellation(order.getId())).isFalse();
+    List<OrderEvent> steps = timeline.findByOrderIdOrderByIdAsc(order.getId());
+    assertThat(steps)
+        .filteredOn(e -> e.getType().equals("PAYMENT_VOIDED"))
+        .extracting(OrderEvent::getToStatus)
+        .containsExactly(OrderStatus.CANCELLED, null);
+  }
+
+  @Test
+  void aVoidForAnOrderThatIsNotCancelledChangesNothing() {
+    Order order = saga.create("cust-1", List.of(new OrderItem("sku-1", 1, new BigDecimal("5.00"))));
+
+    assertThat(saga.compensated(order.getId(), "NONE", "c")).isFalse();
+    assertThat(saga.compensated("missing", "NONE", "c")).isFalse();
+    assertThat(orders.findById(order.getId()).orElseThrow().getCompensatedAt()).isNull();
+  }
+
+  @Test
   void redeliveredEventIsAppliedOnlyOnce() {
     Order order = saga.create("cust-1", List.of(new OrderItem("sku-1", 1, new BigDecimal("5.00"))));
     saga.apply(order.getId(), SagaEvent.INVENTORY_RESERVED, "c");

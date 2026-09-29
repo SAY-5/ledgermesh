@@ -2,13 +2,15 @@
 
 Fault tolerant order processing across three Spring Boot microservices on Docker: Kafka
 messaging (Redpanda), Redis caching, Resilience4j circuit breakers, time limiters and retries,
-a GitLab CI pipeline, and a chaos test that kills one service under load and proves that zero
-orders failed.
+a GitLab CI pipeline, and a chaos test that kills one service under load and then checks, order by
+order, that none was lost and none is left charged, in the payment ledger or on the card, without
+being confirmed.
 
 `make chaos` starts the stack, submits orders at 20/s for 60 s, kills the inventory, payment or
 order service three times, with moments and victims drawn from `CHAOS_SEED` (restarting each after
-5 s), waits for the saga backlog to drain and asserts every order reached CONFIRMED or a legitimate
-out of stock CANCELLED.
+5 s), waits for the saga backlog to drain and asserts every order reached CONFIRMED, or CANCELLED
+for stock or for a saga deadline, with money and stock following the outcome: a confirmed order paid once and holding its
+stock, a cancelled one charged nothing, holding nothing and with nothing left on the card.
 
 ## Architecture
 
@@ -21,6 +23,8 @@ out of stock CANCELLED.
                                +------ payment.completed / failed ---- payment-service
                                |                                      (retry + breaker + time
                                +------ order.cancelled --> inventory   limiter + deferred queue)
+                               |                      \--> payment-service (void, release)
+                               +------ payment.voided <---- payment-service
 
   each service: Postgres database with orders/stock/payments + outbox_event + processed_event
   inventory: Redis stock:{sku} cache (write-through after commit, TTL)
@@ -28,7 +32,8 @@ out of stock CANCELLED.
 
 * **order-service** (8081): accepts orders, writes the order and an `order.created` outbox row in
   one transaction, drives the saga `PENDING -> RESERVED -> CONFIRMED | CANCELLED` and emits
-  `order.cancelled` as compensation when a payment is declined. Every step has a deadline; a
+  `order.cancelled` as compensation when a payment is declined or a deadline runs out, sending it
+  again until the payment service answers with `payment.voided`. Every step has a deadline; a
   reaper cancels reservations that never answer and re-drives silent payments once before
   cancelling. Each step is appended to a per order timeline. `GET /stock/{sku}` is a
   read-your-writes lookup wrapped in `@CircuitBreaker` + `@TimeLimiter` with a cache fallback.
@@ -38,14 +43,16 @@ out of stock CANCELLED.
 * **payment-service** (8083): authorizes against a deterministic synthetic processor behind
   `Retry(CircuitBreaker(TimeLimiter(call)))`; exhaustion defers the payment to a retry queue,
   never drops it. A re-drive from the order service is answered with the outcome on file or a
-  fresh attempt.
+  fresh attempt. A cancelled order has its payment voided, or blocked when the cancellation
+  arrives before the payment was made, has whatever the processor holds for it released, and is
+  answered with `payment.voided`.
 * **common**: event contracts, topic names, transactional outbox relay, idempotent consumer,
   correlation ids, breaker transition metrics.
 
-Kill any one service at any moment and the outcome of every order is unchanged: the outbox makes
-every event durable before it is sent, idempotent consumers make every redelivery harmless, and
-the deferred queue makes a lost payment attempt resumable. [ARCHITECTURE.md](ARCHITECTURE.md)
-walks through each failure point.
+The outbox makes events durable before sending, idempotent consumers protect redelivery, and the
+deferred queue makes a lost payment attempt resumable. A service outage can still consume a saga
+deadline and change confirmation into cancellation; compensation must then leave no charge or hold.
+[ARCHITECTURE.md](ARCHITECTURE.md) walks through each failure point.
 
 ## Quick start
 
@@ -128,12 +135,38 @@ LedgerMesh chaos summary
 ```
 
 `failed / stuck` counts orders that did not reach a terminal state, orders cancelled for any reason
-other than stock, and rejected submissions. `cancelled (stock)` are orders for `SKU-SCARCE`, which
-is seeded with 40 units so the out of stock branch is exercised on every run. Retries, deferred
-payments and breaker transitions come from the synthetic processor's deterministic transient faults
-and from the kills themselves. Counters are snapshotted right before each kill because a killed JVM
-loses its in-memory meters. The last seven lines are the `/ops/overview` of each service read after
-the backlog drained.
+other than stock or a saga deadline, and rejected or duplicated submissions. `cancelled (stock)` are
+orders for `SKU-SCARCE`, which is seeded with 40 units so the out of stock branch is exercised on
+every run. Retries, deferred payments and breaker transitions come from the synthetic processor's
+deterministic transient faults and from the kills themselves. Counters are snapshotted right before
+each kill because a killed JVM loses its in-memory meters. The last seven lines are the
+`/ops/overview` of each service read after the backlog drained.
+
+What a run guarantees, and what the harness checks: every submitted order reaches CONFIRMED or
+CANCELLED; a confirmed order is paid once, for its amount, holds exactly the stock it asked for, and
+has exactly its one authorization outstanding at the processor; any other order, cancelled or still
+open, has none; a cancelled order is charged nothing and holds nothing, and one cancelled for
+anything but stock has had its cancellation answered by inventory (a released hold or marker) and by
+the payment service (a voided or declined payment, and `payment.voided` recorded by the order
+service), so no late reservation can still take stock or money for it; nothing is paid, held or
+authorized for an order that was never submitted, and the stock rows agree with the holds. An order
+may be cancelled for stock or because its saga outlived a deadline, and for nothing else. A deadline
+runs on the wall clock, the order service's own absences included, so a seed that kills the order
+service more than once can use up the 60 s reservation window of an order placed just before the
+first kill; on the restart the reaper cancels it before the listener reads the reservation and the
+payment waiting for it. Such an order is compensated like any cancellation, its stock released, its
+payment voided and its authorization released at the processor, and a summary the harness writes now
+counts it under `cancelled (deadline)` with its reason instead of under `failed / stuck`. Before
+teardown the harness waits the payment service's reconciliation grace period plus one interval (read
+from its gauges, 17 s with the defaults, or `CHAOS_INFLIGHT_WAIT`) before checking that any
+authorization no payment keeps has been released. This wait is not an unconditional cleanup bound:
+provider/database failures, scheduling delays or large listings can require further passes. It then reads every order, its timeline, its
+payment, its stock holds and the synthetic processor's authorizations from the three databases into
+`chaos/out/final.json`, waiting up to `CHAOS_DRAIN_TIMEOUT` for compensations still on their way;
+the `ledger` line fails the run on any money or stock rule broken, and `orders to read` lists every
+order that was not confirmed or cancelled for stock with its payment, what the card holds, its stock
+holds and its timeline. The four runs above were recorded before the harness wrote those lines, and
+each confirmed or cancelled for stock every order it took.
 
 The seed fixes the load, and, under one bash, the kill schedule the harness draws from it. Replaying
 the draw sequence of [chaos/loadgen.py](chaos/loadgen.py) at seed 3 for the 1200 orders of this
@@ -182,55 +215,81 @@ no reason, so this one catches a gross regression rather than a subtle one.
 Knobs: `CHAOS_PROFILE` (`steady` three kills restarting after 5 s, `tight` six kills restarting
 after 2 s), `CHAOS_DURATION`, `CHAOS_RATE`, `CHAOS_KILLS`, `CHAOS_RESTART_AFTER`, `CHAOS_VICTIMS`
 (default all three services), `CHAOS_SEED` (the load and the kill schedule; a fresh one is drawn and
-printed when unset), `CHAOS_MAX_P95`, `CHAOS_DRAIN_TIMEOUT`, `CHAOS_DRAIN_CAP`, `CHAOS_RECORD=1`,
-`CHAOS_LABEL`, `CHAOS_KEEP_STACK=1`, `CHAOS_PYTHON`, and `LEDGERMESH_ORDER_PORT` /
-`LEDGERMESH_INVENTORY_PORT` / `LEDGERMESH_PAYMENT_PORT` when 8081 to 8083 are taken on the host.
-Output lands in `chaos/out/` (orders, kill timeline, metric snapshots, summary); the harness tears
-the stack down on every exit path unless `CHAOS_KEEP_STACK=1`.
+printed when unset), `CHAOS_MAX_P95`, `CHAOS_DRAIN_TIMEOUT`, `CHAOS_DRAIN_CAP`,
+`CHAOS_INFLIGHT_WAIT`, `CHAOS_RECORD=1`, `CHAOS_LABEL`, `CHAOS_KEEP_STACK=1`, `CHAOS_PYTHON`, and
+`LEDGERMESH_ORDER_PORT` / `LEDGERMESH_INVENTORY_PORT` / `LEDGERMESH_PAYMENT_PORT` when 8081 to 8083
+are taken on the host. Output lands in `chaos/out/` (orders, kill timeline, metric snapshots, the
+final ledger, summary); the harness tears the stack down on every exit path unless
+`CHAOS_KEEP_STACK=1`.
 
 ## Tests
 
 ```bash
 make lint     # spotless (google-java-format)
-make test     # mvn verify: 95 unit tests + 16 integration tests
+make test     # mvn verify: unit, PostgreSQL ownership/upgrade, and end-to-end tests
 ```
 
-Unit tests (H2, no Docker): saga state machine transitions and compensation, deadline reaper
-(silent reservation cancelled with release, silent payment re-driven once then cancelled), the
-timeline endpoint, outbox relay ordering and re-send behaviour, idempotent consumer, breaker and
-time limiter fallbacks, cache write-through after commit, atomic and concurrent reservations,
-retry / breaker / deferred queue, re-drive answers, the two creators of one payment racing (the
-second fails on the primary key before it calls the processor, and its redelivery takes the payment
-on file), deterministic processor, the replay cap that turns a record into a parked poison message,
-the replayer committing only the offsets it handled and waiting for its group assignment before it
+Unit tests (H2, no Docker): saga state machine transitions and compensation, deadline reaper (silent
+reservation cancelled with release, silent payment re-driven once then cancelled), the timeline
+endpoint, outbox relay ordering and re-send behaviour, idempotent consumer, breaker and time limiter
+fallbacks, cache write-through after commit, atomic and concurrent reservations, retry / breaker /
+deferred queue, re-drive answers, the two creators of one payment racing (the second fails on the
+primary key before it calls the processor, and its redelivery takes the payment on file), the void
+of a cancelled order's payment (authorized, open, or not made yet, which a later reservation and
+re-drive then leave unmade; a declined payment is left alone; every cancellation answered with
+`payment.voided`), the release of what the processor holds for a voided payment (retried until the
+processor confirms, and due again when an approval lands during a release), the four races between a
+void and a payment (a cancellation losing the insert to a reservation and voiding on redelivery, a
+reservation losing to the marker and never calling the processor, an outcome that read the row
+before the void failing on its version, an attempt that called the processor after the void having
+its approval dropped and released), the synthetic processor's authorizations (one hold per approval,
+released but the one kept, kept apart from the payment service's transactions, and absent when it is
+off), an approval that arrives after its time limit through the real decorator being released, a
+refused release backing off without holding up the others, the reconciler releasing every
+authorization past its grace period that the payment does not keep (voided, declined, absent, a
+surplus beside the kept code, an open payment's stale approval) and leaving a younger one and the
+kept code alone, however many pages of kept ones come before it, the verifier's four races in which
+an answer's commit is lost, the order service sending an unanswered cancellation again until
+`payment.voided` arrives, and the upgrade repair that sends every unanswered cancellation again,
+deterministic processor, the replay cap that turns a record into a parked poison message, the
+replayer committing only the offsets it handled and waiting for its group assignment before it
 treats silence as an empty topic, the request deduplication store, the relay counting a send that
 never confirmed, the open and overdue saga counts behind the ops overview, saga metrics and log
-lines that wait for the commit, and the reservation ledger (a release credits what the order held,
-a release before the reservation is a no-op that blocks the late reservation, a repeated
-reservation takes stock once).
+lines that wait for the commit, and the reservation ledger (a release credits what the order held, a
+release before the reservation is a no-op that blocks the late reservation, a repeated reservation
+takes stock once).
+
+The authorization ownership contract also runs on PostgreSQL 16: late approval after retirement,
+both claim/reconcile lock orderings, first-insert contention, competing-code rollback, cancellation,
+release failure and coordinator recreation, legacy kept codes, cross-order binding, and rejection
+of ambient transactions. Its PostgreSQL fixture boots over a pre-existing payment table and verifies
+that the additive decision schema preserves an authorized row.
 
 Integration tests (`e2e-tests`, Testcontainers Redpanda + Postgres + Redis, all three services
-booted in one JVM): an order flows to CONFIRMED end to end, out of stock and declined payment
-paths with stock release, triple delivery of the same event reserves stock once, a payment
-listener stopped mid-flight confirms after restart, an inventory service restarted with twelve
-orders in flight confirms all of them, and a record that can never be processed reaches the dead
-letter topic after the configured attempts without holding up the record behind it, is replayed
-once, is parked on the second replay and is then listed by `GET /admin/dlq/parked` with its replay
-count and original coordinates. A release that reaches inventory before the reservation it undoes
-leaves stock untouched and the late reservation is rejected. Exactly once at the boundary has a
-class of its own. The same idempotency key twice, two calls racing on one key, a second call whose
-answer has to wait on the key until the first call commits, and the same key retried across a
-restart of the order service each place one order and return one body, and every answer but the
-first carries `Idempotent-Replay: true`. A second call held in its work until the first has
-committed fails on the key and takes its order down with it, so the key still stands for one
-order. An outbox row put back into the crash window is sent again, ignored by the consumer, and
-leaves the stock ledger and the payment unchanged. All three services boot in one JVM and
-therefore share one classpath, so the order and payment contexts exclude the Redis
-auto-configuration that only the inventory service needs; without that
-their health endpoints try to reach a Redis on localhost, readiness never turns UP and every saga
-assertion times out. The ops overview is checked against a listener that is
-stopped and started again: lag rises and falls, the order shows up as in flight and then does not,
-and the services that do not own the saga report the rest of the page without it.
+booted in one JVM): an order flows to CONFIRMED end to end, out of stock and declined payment paths
+with stock release, triple delivery of the same event reserves stock once, a payment listener
+stopped mid-flight confirms after restart, an inventory service restarted with twelve orders in
+flight confirms all of them, an order the reaper cancels at its reservation deadline while its
+reservation and authorized payment wait unread for the order service has its stock released, its
+payment voided and its authorization released at the processor, a cancellation the payment service
+dead letters is sent again by the reaper and voided without a replay, and a record that can never be
+processed reaches the dead letter topic after the configured attempts without holding up the record
+behind it, is replayed once, is parked on the second replay and is then listed by `GET
+/admin/dlq/parked` with its replay count and original coordinates. A release that reaches inventory
+before the reservation it undoes leaves stock untouched and the late reservation is rejected.
+Exactly once at the boundary has a class of its own. The same idempotency key twice, two calls
+racing on one key, a second call whose answer has to wait on the key until the first call commits,
+and the same key retried across a restart of the order service each place one order and return one
+body, and every answer but the first carries `Idempotent-Replay: true`. A second call held in its
+work until the first has committed fails on the key and takes its order down with it, so the key
+still stands for one order. An outbox row put back into the crash window is sent again, ignored by
+the consumer, and leaves the stock ledger and the payment unchanged. All three services boot in one
+JVM and therefore share one classpath, so the order and payment contexts exclude the Redis
+auto-configuration that only the inventory service needs; without that their health endpoints try to
+reach a Redis on localhost, readiness never turns UP and every saga assertion times out. The ops
+overview is checked against a listener that is stopped and started again: lag rises and falls, the
+order shows up as in flight and then does not, and the services that do not own the saga report the
+rest of the page without it.
 
 ## Browser demo
 
@@ -261,7 +320,7 @@ virtual clock and the seeding model.
 | Method | Path | Service | Notes |
 |---|---|---|---|
 | POST | `/orders` | order | body `{customerId, items:[{sku, quantity, unitPrice}]}`; 202 with the order, `Location` header; an `Idempotency-Key` header makes the call repeatable, answered with `Idempotent-Replay` |
-| GET | `/orders/{id}` | order | `status` PENDING, RESERVED, CONFIRMED, CANCELLED; `reason` OUT_OF_STOCK, PAYMENT_DECLINED, RESERVATION_TIMEOUT or PAYMENT_TIMEOUT; `deadlineAt` for the current step, `redrives` |
+| GET | `/orders/{id}` | order | `status` PENDING, RESERVED, CONFIRMED, CANCELLED; `reason` OUT_OF_STOCK, PAYMENT_DECLINED, RESERVATION_TIMEOUT or PAYMENT_TIMEOUT; `deadlineAt` for the current step, `redrives`; `compensatedAt` once the payment service answered the cancellation |
 | GET | `/orders/{id}/timeline` | order | ordered list of `{type, from, to, reason, correlationId, at}`; ignored and late events appear with `to: null` |
 | GET | `/stock/{sku}` | order | live value from inventory, or `source: cache` / `unknown` under the breaker |
 | GET | `/stock/{sku}` | inventory | cache first, database on miss |
@@ -270,6 +329,7 @@ virtual clock and the seeding model.
 | GET | `/admin/dlq` | all | dead letters per source topic that this service has not replayed or parked |
 | GET | `/admin/dlq/parked` | all | records parked on `<topic>.parked` per source topic, with their replay count, original coordinates and exception |
 | POST | `/admin/dlq/{topic}/replay` | all | puts dead letters back on `{topic}`; `max` caps the batch, answer is `{replayed, parked}` |
+| POST | `/admin/compensations/resend` | order | sends `order.cancelled` again for up to `max` cancelled orders the payment service never answered, oldest first; answer is `{resent, orders}` |
 | GET | `/actuator/health/readiness`, `/actuator/prometheus`, `/actuator/circuitbreakers` | all | probes and metrics |
 
 Customers whose id ends with `-declined` and amounts above 10000 are declined by the processor.
@@ -283,7 +343,8 @@ Customers whose id ends with `-declined` and amounts above 10000 are declined by
 | `inventory.rejected` | inventory | order |
 | `payment.completed` | payment | order |
 | `payment.failed` | payment | order |
-| `order.cancelled` | order | inventory |
+| `order.cancelled` | order | inventory, payment |
+| `payment.voided` | payment | order |
 | `order.payment_requested` | order | payment |
 
 Three partitions each, keyed by order id, JSON payloads, `x-correlation-id` and `event-id`
@@ -301,20 +362,22 @@ startup by the first service up.
 2. **build**: a matrix job per service builds the multi-stage Dockerfile and pushes
    `$CI_REGISTRY_IMAGE/<service>:<short sha>` (and `latest` on the default branch).
 3. **chaos**: runs `make chaos` against the compose stack on merge requests and the default
-   branch and keeps `chaos/out/` as an artifact; the job fails if any order failed or if the p95
-   saga latency is above the `CHAOS_MAX_P95` ceiling it sets.
+   branch and keeps `chaos/out/` as an artifact; the job fails if any order failed, if the final
+   ledger breaks a money or stock rule, or if the p95 saga latency is above the `CHAOS_MAX_P95`
+   ceiling it sets.
 4. **web**: `npm ci`, the two generator checks, the production bundle and the simulation's
    self-check, with `web/dist` kept as an artifact.
 
-`.github/workflows/ci.yml` mirrors the same four jobs. `.github/workflows/repeat.yml` runs one
-integration test class 50 times over five runners, each run in a fresh JVM against fresh
-containers, in about seven minutes of wall time; a runner with a failed run fails its job, and the
-summary job counts the failed runs. It runs `ExactlyOnceIT` on every push to a pull request that
-touches the exactly once code, the saga service, the order service's configuration, the test stack
-or the root `pom.xml`, whose Spring Data and Hibernate versions decide whether a save inserts or
-merges. It is not a required check (`main` has no branch protection), so a red run has to be read
-before merging, and `gh workflow run repeat.yml --ref <branch> -f test=<class> -f runs=<n>` starts
-it by hand.
+`.github/workflows/ci.yml` mirrors the same four jobs, and started by hand it runs one chaos job per
+seed it is given, so a red seed can be run again on its own: `gh workflow run ci.yml --ref <branch>
+-f chaos_seeds="54826 54826 1040"`. `.github/workflows/repeat.yml` runs one integration test class
+50 times over five runners, each run in a fresh JVM against fresh containers, in about seven minutes
+of wall time; a runner with a failed run fails its job, and the summary job counts the failed runs.
+It runs `ExactlyOnceIT` on every push to a pull request that touches the exactly once code, the saga
+service, the order service's configuration, the test stack or the root `pom.xml`, whose Spring Data
+and Hibernate versions decide whether a save inserts or merges. It is not a required check (`main`
+has no branch protection), so a red run has to be read before merging, and `gh workflow run
+repeat.yml --ref <branch> -f test=<class> -f runs=<n>` starts it by hand.
 
 ## Saga deadlines
 
@@ -324,14 +387,38 @@ payment answer. `StuckOrderReaper` runs every 5 s and handles expired orders thr
 state machine and outbox as any inbound event:
 
 * PENDING past its deadline: `CANCELLED (RESERVATION_TIMEOUT)` and `order.cancelled` is emitted so
-  a reservation that was made but never reported is released.
+  a reservation that was made but never reported is released, and a payment authorized off it is
+  voided.
 * RESERVED past its deadline, first time: `order.payment_requested` is emitted, the deadline is
   extended and `redrives` becomes 1. The payment service re-emits the outcome it already has or
   attempts the payment now.
-* RESERVED past its deadline again: `CANCELLED (PAYMENT_TIMEOUT)` with release.
+* RESERVED past its deadline again: `CANCELLED (PAYMENT_TIMEOUT)` with release and void.
 
-Timeout cancellations count as failures in the chaos summary, so a deadline that is too tight for
-the stack shows up as a red run rather than a quietly cancelled order.
+The payment service authorizes off `inventory.reserved` whatever the order has become since, so it
+reads `order.cancelled` too: an authorized or open payment is voided, and a cancellation that
+arrives before any payment leaves a voided marker, so the late reservation or re-drive never calls
+the processor. A payment keeps one authorization while it is authorized and none otherwise, and a
+reconciler in the payment service releases every outstanding authorization older than a grace period
+(the longest processor call plus a commit allowance, 10 s by default) that its payment does not
+keep, every 5 s. Grace plus one interval is an expected window only while the database and processor
+are available and scheduling/listing throughput permits it. A durable, order-bound decision row
+serializes claims and retirement before reading the payment: retirement commits before the
+processor release, and a retired late answer cannot complete a payment. A failed release is retried
+on later outstanding-hold passes; tombstones are retained across restarts. Existing authorized
+payments are recognized when first encountered. The [authorization upgrade guide](docs/authorization-upgrade.md)
+requires draining and stopping old payment binaries; mixed-version rolling upgrades are unsafe.
+Voids, authorizations and
+approvals the payment does not keep also make a release due at once, which the sweeper asks the
+processor for behind its breaker and time limit. Every cancellation is answered with
+`payment.voided`, and until that answer arrives the reaper sends `order.cancelled` again every
+`ledgermesh.saga.compensation` (default 60 s), so a cancellation the payment service dead lettered
+is voided on the next copy without anyone replaying it. A deadline runs on the wall clock, including
+any time the order service itself is away; on a restart the reaper can cancel an order whose answers
+are still waiting unread on its topics, which then show up in the timeline as ignored. The chaos
+summary counts these cancellations under `cancelled (deadline)` with their reason and lists each
+with its payment, holds and timeline, rather than hiding them, and fails the run if any of them was
+charged, still holds stock, still has an authorization outstanding at the processor, or never had
+its cancellation answered.
 
 ## Exactly once effects
 
@@ -400,12 +487,13 @@ prints the overview of all three services at the end of a run.
 
 Every entry in full is in [CHANGELOG.md](CHANGELOG.md).
 
-* **v6.0.0**: two calls racing on one `Idempotency-Key` can no longer both place and pay for an
-  order, a re-drive can no longer overwrite the payment a reservation recorded, and the two
-  creators of a payment can no longer both reach the processor; a reservation ledger per order and
-  sku, a `<topic>.parked` topic behind `GET /admin/dlq/parked`, and a seeded chaos
-  harness that also kills the order service. Stock a 5.0.0 inventory service reserved is not
-  credited back by a release after the upgrade, so let open orders finish first.
+* **v6.0.0**: fixes duplicate orders from one idempotency key, payment creation races, and missing
+  cancellation compensation. Durable authorization claims and retirement prevent late answers
+  from keeping released holds and reconciliation from releasing a concurrently kept code. Also adds
+  a per-order/sku reservation ledger, parked dead letters and processor-side chaos ledger audits.
+  [Stop/drain old payment binaries before upgrading](docs/authorization-upgrade.md). Stock reserved
+  by 5.0.0 has no reservation rows: finish open orders and their old-inventory compensations first;
+  the new ledger does not automatically credit legacy deductions.
 * **v5.0.0**: `GET /ops/overview` per service (health, consumer lag, dead letter depth, breaker
   states, in flight and stuck sagas), a `ledgermesh.saga.stuck` gauge, a `tight` chaos profile with
   twice the kills and a two second restart, and the overview in the chaos summary.

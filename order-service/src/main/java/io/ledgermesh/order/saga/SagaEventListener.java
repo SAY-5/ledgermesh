@@ -7,6 +7,7 @@ import io.ledgermesh.common.events.InventoryRejected;
 import io.ledgermesh.common.events.InventoryReserved;
 import io.ledgermesh.common.events.PaymentCompleted;
 import io.ledgermesh.common.events.PaymentFailed;
+import io.ledgermesh.common.events.PaymentVoided;
 import io.ledgermesh.common.events.Topics;
 import io.ledgermesh.common.idempotency.IdempotentConsumer;
 import io.ledgermesh.order.domain.SagaEvent;
@@ -15,9 +16,9 @@ import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 
 /**
- * Consumes reservation and payment outcomes. Offsets are committed per record after the handler
- * returns, so a process killed mid-flight sees the record again and the idempotent consumer decides
- * whether it still needs applying.
+ * Consumes reservation and payment outcomes, and the payment service's answers to cancellations.
+ * Offsets are committed per record after the handler returns, so a process killed mid-flight sees
+ * the record again and the idempotent consumer decides whether it still needs applying.
  */
 @Component
 public class SagaEventListener {
@@ -51,6 +52,21 @@ public class SagaEventListener {
     try {
       idempotent.once(
           CONSUMER, event.eventId(), () -> saga.apply(event.orderId(), signal, correlationId));
+    } finally {
+      CorrelationId.clear();
+    }
+  }
+
+  @KafkaListener(id = "order-compensations", topics = Topics.PAYMENT_VOIDED, groupId = CONSUMER)
+  public void onPaymentVoided(ConsumerRecord<String, String> record) {
+    PaymentVoided event = codec.decode(record.value(), PaymentVoided.class);
+    String correlationId = CorrelationId.fromHeaders(record.headers(), event.correlationId());
+    CorrelationId.bind(correlationId);
+    try {
+      idempotent.once(
+          CONSUMER,
+          event.eventId(),
+          () -> saga.compensated(event.orderId(), event.previous(), correlationId));
     } finally {
       CorrelationId.clear();
     }

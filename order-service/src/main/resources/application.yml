@@ -43,6 +43,7 @@ ledgermesh:
     reservation: ${SAGA_RESERVATION_TIMEOUT:60s}
     payment: ${SAGA_PAYMENT_TIMEOUT:120s}
     max-redrives: 1
+    compensation: ${SAGA_COMPENSATION_TIMEOUT:60s}
     reaper-ms: 5000
   outbox:
     poll-ms: 200

@@ -3,8 +3,76 @@
 Dates are the commit dates of the release tags. Each numbered release is a demo milestone;
 see the versioning note in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## v6.0.0 (2026-09-28)
+## v6.0.0 (2026-09-29)
 
+* An order cancelled at a saga deadline kept the payment authorized for it. The payment service
+  authorizes off `inventory.reserved` whatever the order has become since, and only inventory read
+  `order.cancelled`, so the stock came back and the money did not. Killing the order service more
+  than once can use up an order's 60 s reservation window, since the deadline counts the order
+  service's own absences. Seed 1040, run with the final ledger kept, showed it directly: six orders
+  cancelled for `RESERVATION_TIMEOUT` with their stock released and their payments still
+  `AUTHORIZED`. The chaos job of run 36519954920 (seed 54826) failed with four orders cancelled,
+  and those were most likely the same: its artifact keeps no order states or reasons, so this is
+  inferred, from its four reservations released and none for orders that held nothing, no stuck
+  order, a longest saga of 69721 ms against the 60 s window, and the fact that under a load with no
+  declined customers the only cancellations that release stock are the deadline ones, of which
+  `PAYMENT_TIMEOUT` takes at least 120 s. The payment service now reads `order.cancelled` and voids
+  an authorized or open payment, or inserts a voided marker when the cancellation comes first, so a
+  late reservation or re-drive charges nothing.
+* A void was only a status on the payment row: the processor kept the authorization, and an approval
+  that landed after the void (an attempt that had read the payment open, a reservation that reached
+  the payment service after the cancellation, or a call the time limiter had cut off, which runs on
+  and approves up to `slow-millis` later) was dropped from the ledger but left on the card; so was
+  an approval whose commit lost a race, rolled back or died with the process. Every approval is now
+  an authorization with a code of its own, a payment keeps one while it is authorized and none
+  otherwise, and a reconciler in the payment service lists the processor's outstanding
+  authorizations every 5 s and releases every one its payment does not keep once it is older than
+  the grace period, the longest processor call plus a commit allowance (10 s by default). Grace
+  plus one interval is an expected cleanup window only when provider/database availability,
+  scheduling and listing throughput permit it, not an unconditional bound.
+  Voids, authorizations, approvals a payment does not keep and cancellations sent again also have
+  the sweeper ask the processor at once, behind its breaker and time limit, to release all but the
+  kept code, for settled payments only. The synthetic processor keeps what it granted in a
+  `processor_hold` table of its own, one row per authorization, committed apart from the payment
+  service's transactions, and it and its table exist only while `ledgermesh.processor.synthetic` is
+  on.
+* Review of the unreleased reconciler found two further orderings: a late answer could authorize
+  an already released hold, or reconciliation could release a hold claimed after its payment
+  snapshot. Durable, order-bound `authorization_decision` rows now serialize claim and retirement
+  before fresh payment reads. Claim, payment and completion outbox commit together; irreversible
+  retirement commits before provider release. First-insert conflicts retry only after full
+  rollback, and failed releases retry from outstanding listings without reviving retired codes.
+  The same race contract runs on H2 and PostgreSQL 16, including a legacy-schema upgrade.
+* **Payment upgrade requires stop/drain, not a mixed-version rolling deployment.** Stop all old
+  listeners, sweepers and callback-capable processes before activating the new protocol. Preserve
+  decision tombstones, including on restart; an old binary is not a safe rollback target while
+  retired-code callbacks remain possible. See the [operator upgrade guide](docs/authorization-upgrade.md).
+* A cancellation the payment service could not apply before its retries ran out went to
+  `order.cancelled.dlq`, where only an operator's replay could bring it back, and the charge stayed.
+  The payment service now answers every cancellation with `payment.voided`, the order service
+  records the answer (`compensatedAt`), and its reaper sends `order.cancelled` again, under a fresh
+  event id, for every cancellation still unanswered after `ledgermesh.saga.compensation` (60 s),
+  and again after each wait; `ledgermesh.saga.compensations.overdue` counts those past due.
+* Upgrading: the consumer group `payment-service` is not new, but its subscription to
+  `order.cancelled` is. With no committed offset on that topic, `auto-offset-reset: earliest`
+  applies, so its first start reads every cancellation still inside the topic's retention (the
+  broker's default, as nothing here sets one) and voids what it finds; older cancellations are not
+  read. Orders cancelled before the upgrade are not waiting for `payment.voided` either. After
+  upgrading, call `POST /admin/compensations/resend` on the order service, and again until it
+  answers `resent: 0`: each call sends `order.cancelled` again for up to `max` (1 to 1000) cancelled
+  orders whose cancellation was never answered and that are not waiting for an answer, oldest
+  first, and each one sent waits for its answer from then on like a new cancellation, so the next
+  call takes the next ones. Inventory treats the copies as the no-op releases they are.
+* The chaos harness waits the payment service's reconciliation grace period plus one interval, then
+  reads every order, its timeline, its payment, its stock holds and the synthetic processor's
+  authorizations from the three databases into `chaos/out/final.json`, and fails a run whose ledger
+  breaks a money or stock rule: a confirmed order paid once, holding its stock and its one
+  authorization, any other order holding no authorization, a cancelled one charged nothing, holding
+  nothing and its cancellation answered. A cancellation for a saga deadline is counted under
+  `cancelled (deadline)` with its reason instead of under `failed / stuck`, and every order that was
+  not confirmed or cancelled for stock is listed with its payment, card, holds and timeline. The
+  GitHub chaos job takes a `chaos_seeds` input when started by hand and runs one job per seed
+  listed.
 * Two calls racing on one `Idempotency-Key` could both place an order. The answer was saved with a
   merge, which reads the row first: a call that stored its answer after the other had committed
   found that row and overwrote it instead of failing on the primary key, and both orders were
@@ -14,7 +82,7 @@ see the versioning note in [CONTRIBUTING.md](CONTRIBUTING.md).
 * A payment has two creators on two topics, the `inventory.reserved` listener and a re-drive that
   finds no payment on file, and it was saved with a merge as well. The listener commits the payment
   it records before it attempts it, so a re-drive that saved in between overwrote that payment with
-  its own copy. A re-drive records and attempts its payment in one transaction, and its insert
+  its own copy. In 5.0.0 a re-drive recorded and attempted its payment in one transaction, and its insert
   reached the table only after the processor call: a reservation that saved in that window stored
   and authorized a payment of its own, and the re-drive, which had already called the processor,
   then failed on the primary key, so the processor authorized the order twice and only one was
@@ -22,7 +90,9 @@ see the versioning note in [CONTRIBUTING.md](CONTRIBUTING.md).
   and its redelivery took the payment on file. A new payment is now always inserted and flushed, so
   the second creator fails on the primary key before it calls the processor and takes the payment
   on file when the error handler delivers it again. A new order is inserted without the read a
-  merge made first.
+  merge made first. Both listeners now finish their recording transaction before processor I/O;
+  concurrent attempts can still produce surplus authorizations, but only one can be kept and the
+  rest are released.
 * The order service counts a created or changed order in `ledgermesh.orders.transitions` and logs
   it only once its transaction has committed, so the loser of a race on one idempotency key no
   longer shows up in either.
@@ -37,7 +107,9 @@ see the versioning note in [CONTRIBUTING.md](CONTRIBUTING.md).
   reservation, and a repeated reservation takes stock once.
 * Stock that a 5.0.0 inventory service reserved has no reservation rows, so when its order is
   cancelled after the upgrade the release credits nothing and leaves released markers instead. Let
-  open orders reach CONFIRMED or CANCELLED before upgrading the inventory service.
+  open orders reach CONFIRMED or CANCELLED, and let their compensations finish on the old inventory
+  service before upgrading it. Existing legacy deductions are not automatically reconstructed or
+  credited by the new reservation ledger.
 * The chaos harness kills the order service as well, sends an `Idempotency-Key` per order and
   retries it while intake is away, seeds the kill schedule from `CHAOS_SEED`, tears the stack down
   on every exit path, stamps commit, host, Docker version and knobs into the summary, records runs

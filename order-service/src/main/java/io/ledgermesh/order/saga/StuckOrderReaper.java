@@ -16,8 +16,16 @@ import org.springframework.stereotype.Component;
  * Finds orders whose current saga step has passed its deadline and moves them on. A pending order
  * that never heard back from inventory is cancelled and its reservation released, in case it was
  * made. A reserved order that never heard back from payment is asked for again once; if the
- * deadline passes a second time it is cancelled and released. Every decision goes through the state
- * machine and the outbox, so a reaper tick is as durable and as idempotent as any other saga step.
+ * deadline passes a second time it is cancelled and released. A cancellation the payment service
+ * has not answered with {@code payment.voided} in time is sent again. Every decision goes through
+ * the state machine and the outbox, so a reaper tick is as durable and as idempotent as any other
+ * saga step.
+ *
+ * <p>The deadlines run on the wall clock, the order service's own absences included, so the first
+ * tick after a restart can cancel an order whose answers are still unread on its topics or unsent
+ * in its own outbox. Holding the reaper back until the order service has caught up would need its
+ * consumer lag at zero and its own outbox backlog drained, not just its partitions assigned; it is
+ * left as it is, and such a cancellation is compensated like any other.
  */
 @Component
 @ConditionalOnProperty(name = "ledgermesh.saga.reaper", havingValue = "true", matchIfMissing = true)
@@ -62,6 +70,14 @@ public class StuckOrderReaper {
       if (moved) {
         acted++;
         log.warn("order {} passed its {} deadline", id, order.getStatus());
+      }
+    }
+    for (Order order :
+        orders
+            .findTop100ByCompensatedAtIsNullAndCompensationDueAtLessThanEqualOrderByCompensationDueAtAsc(
+                clock.instant())) {
+      if (saga.resendCancellation(order.getId())) {
+        acted++;
       }
     }
     return acted;

@@ -10,6 +10,7 @@ public final class Topics {
   public static final String INVENTORY_REJECTED = "inventory.rejected";
   public static final String PAYMENT_COMPLETED = "payment.completed";
   public static final String PAYMENT_FAILED = "payment.failed";
+  public static final String PAYMENT_VOIDED = "payment.voided";
 
   public static final String[] ALL = {
     ORDER_CREATED,
@@ -18,7 +19,8 @@ public final class Topics {
     INVENTORY_RESERVED,
     INVENTORY_REJECTED,
     PAYMENT_COMPLETED,
-    PAYMENT_FAILED
+    PAYMENT_FAILED,
+    PAYMENT_VOIDED
   };
 
   /** Suffix of the dead letter topic that shadows every business topic. */

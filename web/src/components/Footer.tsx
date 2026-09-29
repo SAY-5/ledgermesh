@@ -12,8 +12,10 @@ export function Footer() {
             limits, retry policy, deferred queue and synthetic processor, its constants generated
             from the services' application.yml files. Not simulated: the saga deadlines and reaper,
             the order timeline, dead letters with their replay and parking, the Idempotency-Key
-            store, the ops overview and the reservation ledger (v2.0.0 to v6.0.0), which the README
-            documents. The real stack is Spring Boot 3 on JDK 21, Redpanda (Kafka), Redis and
+            store, the ops overview, the reservation ledger, payment cancellation compensation,
+            and durable authorization claim/retirement (v2.0.0 to v6.0.0), which the README
+            documents. These payment-safety mechanisms are tested in the real services, not proved
+            by this browser simulation. The real stack is Spring Boot 3 on JDK 21, Redpanda (Kafka), Redis and
             Postgres on Docker Compose, with the chaos test run by GitLab CI and GitHub Actions.
             Time here is virtual and seeded, so a run is reproducible; the JVM boot after a kill is
             modelled as 2.5 s.

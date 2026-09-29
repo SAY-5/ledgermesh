@@ -1,8 +1,9 @@
 # Architecture
 
 LedgerMesh is three Spring Boot services that complete an order through a choreographed saga
-over Kafka. The design goal is simple to state: killing any one service at any moment must not
-change the outcome of any order. This document explains the mechanisms that make that true.
+over Kafka. A process crash must not discard committed work or leave a cancelled order charged.
+An outage can still exhaust a saga deadline and lead to cancellation rather than confirmation.
+This document explains replay, compensation and the limits of those guarantees.
 
 ## Services and topics
 
@@ -33,7 +34,8 @@ change the outcome of any order. This document explains the mechanisms that make
 | `inventory.rejected` | inventory | order | out of stock or unknown sku; order is CANCELLED |
 | `payment.completed` | payment | order | order is CONFIRMED |
 | `payment.failed` | payment | order | order is CANCELLED and compensation is emitted |
-| `order.cancelled` | order | inventory | release the reservation |
+| `order.cancelled` | order | inventory, payment | release the reservation; void the payment, or block it if not made yet, and release what the processor holds |
+| `payment.voided` | payment | order | the payment side of a cancellation is done; the order service stops sending `order.cancelled` |
 | `order.payment_requested` | order | payment | the payment deadline passed; answer with the outcome on file or attempt now |
 
 Every topic has three partitions and every message is keyed by order id, so all events for one
@@ -142,8 +144,10 @@ RESERVED + PAYMENT_TIMEOUT     -> CANCELLED (PAYMENT_TIMEOUT), emit order.cancel
 Payment outcomes are also accepted from PENDING because the two inbound topics are independent
 and a payment can only exist for a reserved order. When a payment is declined the order service
 writes `order.cancelled` to its outbox in the same transaction as the cancellation; the inventory
-service releases the reserved units, again idempotently. A legitimate CANCELLED (out of stock or
-declined card) is a correct business outcome and is reported separately from failures.
+service releases the reserved units, again idempotently. The payment service reads the same event
+and voids the order's payment (below). A legitimate CANCELLED (out of stock, a declined card, or a
+saga deadline that ran out) is a correct business outcome and is reported separately from
+failures.
 
 ## Deadlines, the reaper and the timeline
 
@@ -162,8 +166,40 @@ described below rejects the `order.created` if it turns up later. A silent payme
 goes to the payment service, which either re-emits `payment.completed` / `payment.failed` under a
 fresh event id (the first copy evidently never applied) or attempts the payment now (recording it
 from the request when it was never seen). Only a second expiry cancels with `PAYMENT_TIMEOUT`. A
-payment outcome that arrives after that is recorded in the timeline as ignored and left for
-reconciliation; the terminal rule of the state machine still holds.
+payment outcome that arrives after that is recorded in the timeline as ignored, and the terminal
+rule of the state machine still holds; the payment itself is voided by the payment service when
+`order.cancelled` reaches it, so the customer is not charged for the cancelled order.
+
+A cancellation that emits `order.cancelled` also sets `compensationDueAt` on the order and waits
+for the payment service to answer with `payment.voided`. The reaper sends `order.cancelled` again,
+under a fresh event id, for every cancellation still unanswered at its due time, and waits again
+(`ledgermesh.saga.compensation`, 60 s by default; `ledgermesh.saga.compensations.overdue` counts
+the ones past due). This matters because the payment service's handler can fail like any other: a
+cancellation it cannot apply before its retries run out goes to `order.cancelled.dlq`, and replay
+from there is an operator's decision that may never come. With the resend, the dead letter is only
+a delay: the next copy is voided like the first would have been, since the payment service
+applies every copy the same way and answers every one. `POST /admin/compensations/resend` sends the
+cancellation of every cancelled order that was never answered, including orders cancelled before
+the order service waited for answers, which are not waiting for one; after that they wait like
+any other.
+
+A deadline runs on the wall clock, and the order service's own absences count against it. An
+order placed just before the order service went away, whose reservation window its absences used
+up, is cancelled by the reaper's first tick after a restart, before the answers to it have been
+applied. The chaos run of seed 1040 killed the order service three times and cancelled six orders
+that way, each 61 to 62 s after it was placed: three had their reservation and the payment
+authorized off it waiting unread on the order service's topics, applied as ignored a fraction of a
+second after the cancellation, and three still had their `order.created` in the order service's
+outbox, so inventory reserved and payment authorized them just after they were cancelled. Either
+way the cancellation is compensated in full, stock released and payment voided, and the chaos
+summary reports it under `cancelled (deadline)` rather than as a failure.
+
+Holding the reaper back after a restart would spare some of these cancellations, but partition
+assignment is not the signal for it: the answers can still be unread with partitions assigned, and
+three of the six above had not even been sent, since their `order.created` was still in the order
+service's own outbox. The reaper would have to wait for the saga listener's lag to reach zero and
+for the order service's outbox backlog to drain. It does not; the cancellation is compensated
+instead.
 
 Every step, including ignored and late events, is appended to `order_event` in the same
 transaction as the change it describes and served by `GET /orders/{id}/timeline`. Because the row
@@ -183,6 +219,11 @@ for an order that already has released rows is rejected with `ALREADY_RELEASED`.
 topics are consumed by independent listener containers, so this is what makes their relative order
 irrelevant; a reservation delivered again under a fresh event id (a replayed dead letter) finds its
 own rows and takes nothing twice.
+
+This ledger cannot reconstruct stock deducted by 5.0.0, which had no reservation rows. Drain open
+orders and finish their compensations on the old inventory service before upgrading. A new-version
+release with no historical reservation credits zero and leaves a released marker; it does not infer
+the missing amount from an order payload. See the [upgrade guide](docs/authorization-upgrade.md).
 
 Redis holds `stock:{sku}` with a TTL. Writes are write-through but deferred to `afterCommit`, so
 the cache never shows a value that was rolled back; the TTL bounds the damage of a missed write.
@@ -215,8 +256,78 @@ before it calls the processor. Its transaction rolls back, and the error handler
 record again; this time it finds the payment on file, so the reservation leaves a settled payment
 alone and the re-drive attempts an open one or re-emits a settled one's outcome.
 
-The synthetic processor is deterministic: outcomes depend only on the order id and the attempt
-number, so a run is reproducible and the retry and breaker paths are exercised on every run.
+A cancelled order's payment has to come back, from the payment service's rows and from the card.
+The payment service authorizes off `inventory.reserved` whatever the order has become since, so it
+also consumes `order.cancelled`. An authorized payment is voided (its authorization code kept as
+the record) and an open one is voided before the sweeper or a re-drive can attempt it; either way
+the void makes a release at the processor due (`releaseDueAt`), because an authorized payment holds
+money on the card and an open one may have been approved by an attempt whose answer never made it
+back. A declined payment is left alone. A cancellation that finds no payment on file, because the
+reservation has not reached the payment service yet, inserts a voided marker for nothing, the way
+inventory leaves a released marker, so the late reservation and any re-drive find the order given
+up and never call the processor; nothing was asked of the processor for it, so no release is due.
+The marker is inserted like a payment, so a race with either creator ends on the primary key and a
+redelivery onto the winner's row. Whatever it found, the cancellation is answered with
+`payment.voided` in the same transaction.
+
+The processor's answers do not always make it into the payment. The time limiter cuts a slow call
+off but cannot stop it: the call runs on and the processor acts on it, and a synthetic slow call
+approves up to `slow-millis` (3 s) after it started. An answer's commit can also lose to a
+concurrent write on the payment's version (a void, another attempt's approval, a release being
+recorded), roll back with the transaction around it, or die with a killed process. (A re-drive calls
+the processor only after the consumer's transaction has committed, so its answer commits on its
+own.) Every approval is a new authorization with a code of its own, so a timed out attempt and its
+retry that both approve are two holds on the card, and an approval whose commit was lost is a hold
+no payment knows it has.
+
+So the rule that the card holds only what the payment keeps is enforced from the processor's side.
+`HoldReconciler` runs every `ledgermesh.payment.reconcile-ms` (5 s), pages through the merchant's
+outstanding authorizations, and releases every one older than the grace period that its payment does
+not keep. A payment keeps exactly one code, the one it is authorized under, and nothing while it is
+voided, declined, open or absent: an open payment has not committed that approval and will be
+attempted again under a new code. The grace period is the longest a processor call can run, the
+longest of the processor's own bound and the configured time limits (5 s here), plus
+`ledgermesh.payment.reconcile.commit-allowance` (5 s) as a courtesy window for a returning answer.
+Age alone cannot prove that an answer will never commit. Approval and reconciliation instead lock
+the same durable `authorization_decision` row before reading fresh payment state. A successful
+claim, payment authorization and completion outbox event commit atomically. Reconciliation either
+recognizes the kept code (including pre-upgrade payments) or commits irreversible retirement, then
+calls the provider outside the transaction. A late retired-code approval emits no completion and
+leaves an open payment retryable. A release failure or process death after retirement leaves the
+tombstone for a later outstanding-hold pass. Concurrent missing-row insertion retries the whole
+transaction after rollback; different codes still arbitrate through the payment's version.
+
+Grace plus one interval is only an expected cleanup window while scheduling, database/provider
+availability and listing throughput permit it. A future real-provider adapter must supply the
+listing/release operations and scope authorization keys by provider/account if required; this
+repository validates a synthetic provider, not a live card-network integration. Old payment
+binaries ignore retirement, so [upgrade requires stop/drain](docs/authorization-upgrade.md), not
+mixed-version rolling operation.
+`ledgermesh.payments.reconciled.released` counts what it released and
+`ledgermesh.payments.unkept.oldest.seconds` is the age of the oldest outstanding authorization no
+payment keeps.
+
+The quicker path stays for the cases the payment service sees, all on settled payments, where
+releasing at once cannot touch an approval about to be kept. An answer that came after its time
+limit is published as a `LateOutcome` and committed like any other, with a few tries on a version
+conflict. A release is made due (`releaseDueAt`) when a payment is authorized (any other approval
+for the order), voided, sent a cancellation again, or answered with an approval it does not keep,
+and the sweeper asks the processor, behind its breaker and the longer time limit, to release
+everything under the order's reference but the kept code, recording it only on the version of the
+row it read and backing off after a refusal. Nothing is released this way for an open payment; its
+stale approvals are the reconciler's.
+
+The synthetic processor is deterministic in its outcomes: which attempts approve, fail or hang
+depends only on the order id and the attempt number, so a run is reproducible and the retry and
+breaker paths are exercised on every run; the authorization codes are random. It keeps every
+approval as an outstanding authorization in its own `processor_hold` table, one row per
+authorization, written in transactions of its own so that neither a rolled back payment transaction
+nor a killed payment service loses what it granted, and releases them by order reference but the
+kept one, idempotently. It and its table exist only while `ledgermesh.processor.synthetic` is on,
+which is where a real processor's client would take its place. The chaos harness reads that table at
+the end of a run, after waiting the grace period plus one reconciliation interval: a confirmed order
+must have exactly its one authorization outstanding, and no other order any, whatever state it is
+in.
 
 ## Read-your-writes stock check
 
@@ -226,7 +337,7 @@ freshness after placing an order. It is decorated with `@CircuitBreaker` and `@T
 Caffeine cache, marked `source: cache`, or `unknown` when nothing was ever fetched. The saga never
 depends on this path.
 
-## Why a kill never fails an order
+## What survives a process crash
 
 Take any moment in an order's life and kill inventory or payment:
 
@@ -242,8 +353,19 @@ Take any moment in an order's life and kill inventory or payment:
 6. Payment specifically, between recording and authorizing: the sweeper finds the open payment.
 
 Every step is either durable or replayable, and every replay is idempotent. The order service
-keeps accepting orders throughout because it only needs its own database to commit, which is why
-the chaos run reports `failed / stuck 0` while one service is down.
+can keep accepting orders while inventory or payment is down because intake needs its own database
+to commit. An order-service outage interrupts intake, and client retries use the idempotency key.
+The measured chaos runs report `failed / stuck 0`; this is evidence for those runs, not a promise
+that every outage duration or infrastructure failure preserves confirmation instead of cancellation.
+
+Killing the order service is different in one way: the saga deadlines run on its clock, and they
+keep running while it is away. An order whose reservation window is used up by the order service's
+own absences is cancelled for `RESERVATION_TIMEOUT` when it comes back, and compensated: the
+release returns its stock, the void returns its payment and the processor releases the
+authorization. That is an outcome, not a failure, and the chaos harness checks it as one, from the
+ledger it reads out of the three databases at the end of a run: every order confirmed and paid once
+with its stock held and its authorization outstanding, or cancelled with nothing charged, nothing
+held, nothing left on the card and its cancellation answered.
 
 ## Observability
 
@@ -261,7 +383,7 @@ meters:
 | `ledgermesh.saga.latency` | order | creation to terminal state, p50/p95/p99 |
 | `ledgermesh.saga.redrives` | order | payments asked for again by the reaper |
 | `ledgermesh.saga.stuck` | order | open orders past the deadline of their current step |
-| `ledgermesh.payments.redriven{state}` | payment | re-drives answered for open or settled payments |
+| `ledgermesh.payments.redriven{state}` | payment | re-drives answered for open, settled or voided payments |
 | `ledgermesh.outbox.backlog`, `.published`, `.send.failures`, `.resends` | all | relay health |
 | `ledgermesh.requests.replayed` | order | answers served from the idempotency store |
 | `ledgermesh.consumer.duplicates` | all | redeliveries ignored |
@@ -272,6 +394,10 @@ meters:
 | `ledgermesh.dlq.parked.depth{topic}` | all | records retained on `<topic>.parked` |
 | `ledgermesh.breaker.transitions{name,from,to}` | all | breaker history |
 | `ledgermesh.payments.by_state`, `.deferred`, `.outcomes` | payment | deferred queue |
+| `ledgermesh.payments.voided{was}` | payment | payments voided for cancelled orders, by the state they were in (`NONE` for a marker) |
+| `ledgermesh.payments.releases{result}`, `.releases.due` | payment | releases at the processor: released, nothing to release, failed or superseded; releases not yet confirmed |
+| `ledgermesh.payments.late_outcomes`, `.surplus_approvals{payment}` | payment | processor answers that came after their time limit; approvals a payment does not keep, by the payment's state |
+| `ledgermesh.saga.cancellations.resent`, `ledgermesh.saga.compensations.overdue` | order | cancellations sent again for want of `payment.voided`; cancellations past their wait for it |
 | `ledgermesh.cache.reads{result}` | inventory | cache hit ratio |
 | `ledgermesh.inventory.reservations{result}` | inventory | reservations reserved or rejected |
 | `ledgermesh.inventory.releases{result}` | inventory | compensations that released units, or found nothing to release |

@@ -41,4 +41,8 @@ public class SagaMetrics {
   public void redriven() {
     registry.counter("ledgermesh.saga.redrives").increment();
   }
+
+  public void cancellationSentAgain() {
+    registry.counter("ledgermesh.saga.cancellations.resent").increment();
+  }
 }
