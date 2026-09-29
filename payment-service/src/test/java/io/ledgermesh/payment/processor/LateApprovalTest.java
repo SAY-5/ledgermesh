@@ -16,33 +16,23 @@ import io.ledgermesh.payment.messaging.PaymentEventListener;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
 import java.util.stream.IntStream;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.SpringBootTest;
 
 /**
- * The synthetic processor and the real decorator: a first attempt that is slow is cut off by the
- * time limiter, but the call is not stopped, and it approves after the retry already authorized the
- * payment and the cancellation voided it and released the card. That late approval is a live
- * authorization all the same, and has to be released like any other.
+ * The synthetic processor behind the real decorator, with the test configuration's 300 ms time
+ * limit: a first attempt on the slow path is cut off by the time limiter, but the call is not
+ * stopped, and it approves after the retry already authorized the payment and the cancellation
+ * voided it and released the card. That late approval is a live authorization all the same, and has
+ * to be released like any other.
  */
-@SpringBootTest(
-    properties = {
-      "spring.datasource.url=jdbc:h2:mem:late-approvals;DB_CLOSE_DELAY=-1",
-      "ledgermesh.processor.transient-percent=0",
-      "ledgermesh.processor.slow-percent=50",
-      "ledgermesh.processor.slow-millis=" + LateApprovalTest.SLOW_MILLIS
-    })
+@SpringBootTest(properties = "spring.datasource.url=jdbc:h2:mem:late-approvals;DB_CLOSE_DELAY=-1")
 class LateApprovalTest {
-
-  static final long SLOW_MILLIS = 1500;
 
   @Autowired private PaymentService service;
   @Autowired private PaymentRepository payments;
@@ -51,6 +41,15 @@ class LateApprovalTest {
   @Autowired private EventCodec codec;
   @Autowired private CircuitBreakerRegistry breakers;
 
+  @Value("${ledgermesh.processor.transient-percent}")
+  private int transientPercent;
+
+  @Value("${ledgermesh.processor.slow-percent}")
+  private int slowPercent;
+
+  @Value("${ledgermesh.processor.slow-millis}")
+  private long slowMillis;
+
   @BeforeEach
   void clean() {
     breakers.circuitBreaker(PaymentAuthorizer.RESILIENCE_NAME).reset();
@@ -58,45 +57,37 @@ class LateApprovalTest {
   }
 
   @Test
-  void anApprovalThatLandsAfterTheVoidAndItsReleaseIsReleasedToo() throws Exception {
-    // an order whose first attempt takes the slow path and whose second is answered at once
-    String orderId =
-        IntStream.range(0, 1000)
+  void anApprovalCutOffByTheTimeLimiterThatLandsAfterTheReleaseIsReleasedToo() throws Exception {
+    // attempt 1 takes the slow path (cut off by the time limiter, still running for slow-millis),
+    // attempt 2 is approved at once
+    String id =
+        IntStream.range(0, 200000)
             .mapToObj(i -> "late-" + i)
-            .filter(id -> SyntheticProcessor.bucket(id + ":1") < 50)
-            .filter(id -> SyntheticProcessor.bucket(id + ":2") >= 50)
+            .filter(s -> slow(SyntheticProcessor.bucket(s + ":1")))
+            .filter(s -> SyntheticProcessor.bucket(s + ":2") >= transientPercent + slowPercent)
             .findFirst()
             .orElseThrow();
-    service.record(reserved(orderId), "c");
 
-    long started = System.nanoTime();
-    ExecutorService pool = Executors.newSingleThreadExecutor();
-    try {
-      Future<?> attempt = pool.submit(() -> service.attempt(orderId));
-      attempt.get(10, TimeUnit.SECONDS);
-    } finally {
-      pool.shutdownNow();
-    }
-    assertThat(payments.findById(orderId).orElseThrow().getStatus())
-        .isEqualTo(PaymentStatus.AUTHORIZED);
+    listener.onInventoryReserved(consumed(reserved(id)));
+    assertThat(payments.findById(id).orElseThrow().getStatus()).isEqualTo(PaymentStatus.AUTHORIZED);
 
-    listener.onOrderCancelled(consumed(cancelled(orderId)));
+    listener.onOrderCancelled(consumed(cancelled(id)));
     service.sweepReleases();
-    assertThat(payments.findById(orderId).orElseThrow().getStatus())
-        .isEqualTo(PaymentStatus.VOIDED);
+    assertThat(payments.findById(id).orElseThrow().getStatus()).isEqualTo(PaymentStatus.VOIDED);
+    assertThat(holds.outstanding(id)).isZero();
 
-    // the slow first call is still running; wait it out, then let the releases that are due run
-    long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
-    Thread.sleep(Math.max(0, SLOW_MILLIS + 500 - elapsed));
-    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-    while (holds.outstanding(orderId) > 0 && System.nanoTime() < deadline) {
-      service.sweepReleases();
-      Thread.sleep(100);
-    }
+    // the first call approves once its slow path is over; then the releases that are due run
+    Thread.sleep(slowMillis + 1000);
+    service.sweepReleases();
 
-    assertThat(holds.outstanding(orderId)).isZero();
-    assertThat(payments.findById(orderId).orElseThrow().getStatus())
-        .isEqualTo(PaymentStatus.VOIDED);
+    assertThat(holds.outstanding(id))
+        .as("authorizations outstanding at the processor for a voided payment")
+        .isZero();
+    assertThat(payments.findById(id).orElseThrow().getStatus()).isEqualTo(PaymentStatus.VOIDED);
+  }
+
+  private boolean slow(int bucket) {
+    return bucket >= transientPercent && bucket < transientPercent + slowPercent;
   }
 
   private ConsumerRecord<String, String> consumed(DomainEvent event) {
