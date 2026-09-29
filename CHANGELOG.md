@@ -9,20 +9,48 @@ see the versioning note in [CONTRIBUTING.md](CONTRIBUTING.md).
   authorizes off `inventory.reserved` whatever the order has become since, and only inventory read
   `order.cancelled`, so the stock came back and the money did not. Killing the order service more
   than once can use up an order's 60 s reservation window, since the deadline counts the order
-  service's own absences: the chaos job of run 36519954920 (seed 54826) ended with four orders
-  cancelled for `RESERVATION_TIMEOUT`, and seed 1040, run with the final ledger kept, showed six
-  such orders with their stock released and their payments still `AUTHORIZED`. The payment service
-  now reads `order.cancelled` and voids an authorized or open payment, or inserts a voided marker
-  when the cancellation comes first, so a late reservation or re-drive charges nothing. Its new
-  consumer group starts from the beginning of `order.cancelled`, so its first start also voids
-  payments left authorized for orders cancelled before it.
-* The chaos harness reads every order, its timeline, its payment and its stock holds from the three
-  databases into `chaos/out/final.json`, and fails a run whose ledger breaks a money or stock rule:
-  a confirmed order paid once and holding its stock, a cancelled one charged nothing and holding
-  nothing. A cancellation for a saga deadline is counted under `cancelled (deadline)` with its
-  reason instead of under `failed / stuck`, and every order that was not confirmed or cancelled for
-  stock is listed with its payment, holds and timeline. The GitHub chaos job takes a `chaos_seeds`
-  input when started by hand and runs one job per seed listed.
+  service's own absences. Seed 1040, run with the final ledger kept, showed it directly: six orders
+  cancelled for `RESERVATION_TIMEOUT` with their stock released and their payments still
+  `AUTHORIZED`. The chaos job of run 36519954920 (seed 54826) failed with four orders cancelled,
+  and those were most likely the same: its artifact keeps no order states or reasons, so this is
+  inferred, from its four reservations released and none for orders that held nothing, no stuck
+  order, a longest saga of 69721 ms against the 60 s window, and the fact that under a load with no
+  declined customers the only cancellations that release stock are the deadline ones, of which
+  `PAYMENT_TIMEOUT` takes at least 120 s. The payment service now reads `order.cancelled` and voids
+  an authorized or open payment, or inserts a voided marker when the cancellation comes first, so a
+  late reservation or re-drive charges nothing.
+* A void was only a status on the payment row: the processor kept the authorization, and an
+  approval that landed after the void (an attempt that had read the payment open, or a reservation
+  that reached the payment service after the cancellation) was dropped from the ledger but left
+  on the card. The processor now releases every authorization it holds under an order's reference,
+  idempotently; the synthetic processor keeps what it granted in a `processor_hold` table of its
+  own, committed apart from the payment service's transactions. A void makes a release due, the
+  listener asks for it at once and the sweeper again until the processor confirms, recorded only on
+  the version of the payment it read, and an approval that lands after the void makes it due again.
+* A cancellation the payment service could not apply before its retries ran out went to
+  `order.cancelled.dlq`, where only an operator's replay could bring it back, and the charge stayed.
+  The payment service now answers every cancellation with `payment.voided`, the order service
+  records the answer (`compensatedAt`), and its reaper sends `order.cancelled` again, under a fresh
+  event id, for every cancellation still unanswered after `ledgermesh.saga.compensation` (60 s),
+  and again after each wait; `ledgermesh.saga.compensations.overdue` counts those past due.
+* Upgrading: the consumer group `payment-service` is not new, but its subscription to
+  `order.cancelled` is. With no committed offset on that topic, `auto-offset-reset: earliest`
+  applies, so its first start reads every cancellation still inside the topic's retention (the
+  broker's default, as nothing here sets one) and voids what it finds; older cancellations are not
+  read. Orders cancelled before the upgrade are not waiting for `payment.voided` either. After
+  upgrading, call `POST /admin/compensations/resend` on the order service, again while `resent`
+  comes back equal to `max`: it sends `order.cancelled` again for every cancelled order whose
+  cancellation was never answered, oldest first, and from then on each waits for its answer like a
+  new cancellation. Inventory treats the copies as the no-op releases they are.
+* The chaos harness reads every order, its timeline, its payment, its stock holds and the
+  synthetic processor's authorizations from the three databases into `chaos/out/final.json`, and
+  fails a run whose ledger breaks a money or stock rule: a confirmed order paid once, holding its
+  stock and its one authorization, a cancelled one charged nothing, holding nothing, with nothing
+  left on the card and its cancellation answered. A cancellation for a saga deadline is counted
+  under `cancelled (deadline)` with its reason instead of under `failed / stuck`, and every order
+  that was not confirmed or cancelled for stock is listed with its payment, card, holds and
+  timeline. The GitHub chaos job takes a `chaos_seeds` input when started by hand and runs one job
+  per seed listed.
 * Two calls racing on one `Idempotency-Key` could both place an order. The answer was saved with a
   merge, which reads the row first: a call that stored its answer after the other had committed
   found that row and overwrote it instead of failing on the primary key, and both orders were
