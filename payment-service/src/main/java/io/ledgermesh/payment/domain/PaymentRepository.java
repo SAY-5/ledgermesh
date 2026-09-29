@@ -27,8 +27,24 @@ public interface PaymentRepository extends JpaRepository<Payment, String> {
   @Transactional
   @Modifying
   @Query(
-      "update Payment p set p.releaseDueAt = null, p.releasedAt = :now, p.version = p.version + 1"
+      "update Payment p set p.releaseDueAt = null, p.releasedAt = :now, p.releaseAttempts = 0,"
+          + " p.version = p.version + 1"
           + " where p.orderId = :orderId and p.version = :version and p.releaseDueAt is not null")
   int released(
       @Param("orderId") String orderId, @Param("version") Long version, @Param("now") Instant now);
+
+  /**
+   * Pushes a release the processor refused back to {@code next}, on the version of the row the
+   * release started from; returns 0 when the row changed meanwhile.
+   */
+  @Transactional
+  @Modifying
+  @Query(
+      "update Payment p set p.releaseDueAt = :next, p.releaseAttempts = p.releaseAttempts + 1,"
+          + " p.version = p.version + 1"
+          + " where p.orderId = :orderId and p.version = :version and p.releaseDueAt is not null")
+  int releaseRefused(
+      @Param("orderId") String orderId,
+      @Param("version") Long version,
+      @Param("next") Instant next);
 }

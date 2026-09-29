@@ -10,7 +10,6 @@ import io.ledgermesh.common.outbox.OutboxWriter;
 import io.ledgermesh.payment.domain.Payment;
 import io.ledgermesh.payment.domain.PaymentRepository;
 import io.ledgermesh.payment.domain.PaymentStatus;
-import io.ledgermesh.payment.processor.PaymentProcessor;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
 import java.time.Duration;
@@ -21,6 +20,8 @@ import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.event.EventListener;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -43,9 +44,14 @@ import org.springframework.transaction.support.TransactionTemplate;
  * be fulfilled, or inserts a voided marker when it comes before both creators, the same way, so a
  * race with a creator ends with one of the two delivered again onto the other's row. It answers
  * every cancellation with {@code payment.voided}, which is how the order service knows the payment
- * side of the compensation is done. A void that may leave money held on the card makes a release at
- * the processor due; {@link #releaseHold} asks for it right away and {@link #sweepReleases} again
- * until the processor confirms, and an approval that lands after the void makes it due again.
+ * side of the compensation is done.
+ *
+ * <p>Every answer the processor gives reaches {@link #commit}, the ones that came after their time
+ * limit included ({@link LateOutcome}). A payment keeps one authorization while it is authorized
+ * and none otherwise, and anything else the processor may hold for the order makes a release due:
+ * an authorization (any other approval for the order), a void, a cancellation sent again, and every
+ * approval the payment does not keep. {@link #sweepReleases} asks the processor, behind its breaker
+ * and time limit, to release all but the kept one, until it confirms, backing off after refusals.
  */
 @Service
 public class PaymentService {
@@ -54,7 +60,6 @@ public class PaymentService {
 
   private final PaymentRepository payments;
   private final PaymentAuthorizer authorizer;
-  private final PaymentProcessor processor;
   private final OutboxWriter outbox;
   private final TransactionTemplate tx;
   private final Clock clock;
@@ -65,7 +70,6 @@ public class PaymentService {
   public PaymentService(
       PaymentRepository payments,
       PaymentAuthorizer authorizer,
-      PaymentProcessor processor,
       OutboxWriter outbox,
       TransactionTemplate tx,
       Clock clock,
@@ -74,7 +78,6 @@ public class PaymentService {
       @Value("${ledgermesh.payment.retry-delay:2s}") Duration retryDelay) {
     this.payments = payments;
     this.authorizer = authorizer;
-    this.processor = processor;
     this.outbox = outbox;
     this.tx = tx;
     this.clock = clock;
@@ -173,6 +176,10 @@ public class PaymentService {
       payment.voided(event.reason(), now);
     } else {
       after = payment.getStatus();
+      if (after == PaymentStatus.VOIDED) {
+        // a cancellation sent again: check with the processor once more
+        payment.releaseOwed(now);
+      }
     }
     outbox.append(
         new PaymentVoided(
@@ -189,11 +196,11 @@ public class PaymentService {
   }
 
   /**
-   * Asks the processor to release what it holds for a voided payment's order, when a release is
-   * due. Runs outside any transaction, and records the release only on the version of the row it
-   * read, so an approval that landed meanwhile leaves the release due for the next sweep. A
-   * processor that cannot be reached leaves it due as well. Returns whether the release was
-   * recorded.
+   * Asks the processor to release every authorization it holds for the order but the one the
+   * payment keeps, when a release is due. Runs outside any transaction, and records the release
+   * only on the version of the payment row it read, so an approval that landed meanwhile leaves the
+   * release due for the next sweep. A processor that cannot be reached or does not answer in time
+   * pushes the release back, a little further each time. Returns whether a release was recorded.
    */
   public boolean releaseHold(String orderId) {
     Payment payment = payments.findById(orderId).orElse(null);
@@ -202,10 +209,12 @@ public class PaymentService {
     }
     int released;
     try {
-      released = processor.release(orderId);
+      released = authorizer.release(orderId, payment.keptAuthorization());
     } catch (RuntimeException e) {
+      Duration wait = retryDelay.multipliedBy(Math.min(payment.getReleaseAttempts() + 1, 5));
+      payments.releaseRefused(orderId, payment.getVersion(), clock.instant().plus(wait));
       meters.counter("ledgermesh.payments.releases", "result", "failed").increment();
-      log.warn("release for order {} failed, left due: {}", orderId, e.toString());
+      log.warn("release for order {} failed, due again in {}: {}", orderId, wait, e.toString());
       return false;
     }
     if (payments.released(orderId, payment.getVersion(), clock.instant()) == 0) {
@@ -215,11 +224,13 @@ public class PaymentService {
     meters
         .counter("ledgermesh.payments.releases", "result", released > 0 ? "released" : "nothing")
         .increment();
-    log.info("processor released {} authorization(s) for order {}", released, orderId);
+    if (released > 0) {
+      log.info("processor released {} authorization(s) for order {}", released, orderId);
+    }
     return true;
   }
 
-  /** Asks for every release that is due. Returns how many were recorded. */
+  /** Asks for every release that is due, the longest due first. Returns how many were recorded. */
   public int sweepReleases() {
     int recorded = 0;
     for (Payment payment :
@@ -229,6 +240,25 @@ public class PaymentService {
       }
     }
     return recorded;
+  }
+
+  /**
+   * An answer the processor gave after its time limit. It is committed like any other, and retried
+   * when a concurrent write to the payment won the version, so it cannot be lost to a race.
+   */
+  @EventListener
+  public void onLateOutcome(LateOutcome late) {
+    meters.counter("ledgermesh.payments.late_outcomes").increment();
+    for (int tries = 1; ; tries++) {
+      try {
+        commit(late.orderId(), late.outcome());
+        return;
+      } catch (OptimisticLockingFailureException e) {
+        if (tries >= 5) {
+          throw e;
+        }
+      }
+    }
   }
 
   private void reemit(Payment payment) {
@@ -267,11 +297,7 @@ public class PaymentService {
             ? authorizer.authorizeDeferred(
                 orderId, payment.getCustomerId(), payment.getAmount(), payment.getAttempts())
             : authorizer.authorize(orderId, payment.getCustomerId(), payment.getAmount());
-    PaymentStatus status = commit(orderId, outcome);
-    if (status == PaymentStatus.VOIDED && outcome instanceof AuthorizationOutcome.Authorized) {
-      releaseHold(orderId);
-    }
-    return Optional.of(status);
+    return Optional.of(commit(orderId, outcome));
   }
 
   /** Persists the outcome and its event in one transaction. Safe to call from any thread. */
@@ -281,15 +307,21 @@ public class PaymentService {
 
   private PaymentStatus applyOutcome(String orderId, AuthorizationOutcome outcome) {
     Payment payment = payments.findById(orderId).orElseThrow();
-    if (payment.getStatus() == PaymentStatus.VOIDED
-        && outcome instanceof AuthorizationOutcome.Authorized) {
-      // the processor approved an attempt that started before the void: that hold goes back too
-      payment.approvedAfterVoid(clock.instant());
-      meters.counter("ledgermesh.payments.approvals_after_void").increment();
-      log.warn("payment for order {} approved after its void, release due again", orderId);
-      return PaymentStatus.VOIDED;
-    }
     if (!payment.getStatus().isOpen()) {
+      if (outcome instanceof AuthorizationOutcome.Authorized a
+          && !a.code().equals(payment.keptAuthorization())) {
+        // an approval this payment does not keep: after its void or decline, or besides the
+        // authorization it has. The processor holds money for it all the same.
+        payment.releaseOwed(clock.instant());
+        meters
+            .counter("ledgermesh.payments.surplus_approvals", "payment", payment.getStatus().name())
+            .increment();
+        log.warn(
+            "payment for order {} is {} and the processor approved {} as well, release due",
+            orderId,
+            payment.getStatus(),
+            a.code());
+      }
       return payment.getStatus();
     }
     payment.attempted();

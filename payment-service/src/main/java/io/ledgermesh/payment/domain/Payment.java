@@ -10,6 +10,7 @@ import jakarta.persistence.Table;
 import jakarta.persistence.Version;
 import java.math.BigDecimal;
 import java.time.Instant;
+import org.hibernate.annotations.ColumnDefault;
 
 /** One payment per order. Open payments form the deferred retry queue. */
 @Entity
@@ -53,15 +54,24 @@ public class Payment {
   private Instant updatedAt;
 
   /**
-   * Set while the processor may still hold an authorization for a voided payment and has not
-   * confirmed its release: from the void, and again when an approval lands after it. Cleared only
-   * by a release that started from the version of the row it clears, so an approval that lands
-   * during a release leaves the next one due.
+   * Set while the processor may hold an authorization for the order that this payment does not keep
+   * (a payment keeps its own authorization while it is authorized, and nothing otherwise), and has
+   * not confirmed it released the rest: from an authorization, a void or a cancellation sent again,
+   * and from every approval the payment does not keep. Cleared only by a release that started from
+   * the version of the row it clears, so an approval that lands during a release leaves the next
+   * one due; pushed back after each release the processor refused.
    */
   private Instant releaseDueAt;
 
-  /** When the processor last confirmed it holds nothing for this payment's order. */
+  /**
+   * When the processor last confirmed it holds nothing for this order the payment does not keep.
+   */
   private Instant releasedAt;
+
+  /** Releases the processor refused in a row, which sets how long the next one waits. */
+  @ColumnDefault("0")
+  @Column(nullable = false)
+  private int releaseAttempts;
 
   /**
    * Null until the payment is inserted, which is how the repository tells a new payment from a
@@ -106,11 +116,16 @@ public class Payment {
     return marker;
   }
 
+  /**
+   * Keeps this authorization, and makes a release of any other the processor holds for the order
+   * due, such as one granted to an attempt whose answer was lost with a killed payment service.
+   */
   public void authorized(String code, Instant now) {
     this.status = PaymentStatus.AUTHORIZED;
     this.authorizationCode = code;
     this.nextAttemptAt = null;
     this.updatedAt = now;
+    this.releaseDueAt = now;
   }
 
   public void declined(String reason, Instant now) {
@@ -140,10 +155,18 @@ public class Payment {
     this.releaseDueAt = now;
   }
 
-  /** An approval landed after the void: the processor holds money again, release it again. */
-  public void approvedAfterVoid(Instant now) {
+  /**
+   * The processor may hold an authorization this payment does not keep: an approval that landed
+   * after the void or besides the one kept, or a cancellation sent again that asks to check.
+   */
+  public void releaseOwed(Instant now) {
     this.updatedAt = now;
     this.releaseDueAt = now;
+  }
+
+  /** The authorization the processor is told to keep when it releases, if any. */
+  public String keptAuthorization() {
+    return status == PaymentStatus.AUTHORIZED ? authorizationCode : null;
   }
 
   public void attempted() {
@@ -196,6 +219,10 @@ public class Payment {
 
   public Instant getReleasedAt() {
     return releasedAt;
+  }
+
+  public int getReleaseAttempts() {
+    return releaseAttempts;
   }
 
   public Long getVersion() {
