@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Chaos test: load the stack at a fixed order rate while killing one service at
-# a time, then prove every order reached a terminal state with zero failures.
+# a time, then prove every order reached a terminal state with zero failures and
+# that money and stock followed each order's outcome.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -40,7 +41,7 @@ COMPOSE="docker compose -p $PROJECT -f deploy/docker-compose.yml"
 OUT=chaos/out
 if [[ "$KILLS" == 0 ]]; then LABEL="${CHAOS_LABEL:-baseline}"; else LABEL="${CHAOS_LABEL:-$PROFILE}"; fi
 mkdir -p "$OUT"
-rm -f "$OUT"/orders.json "$OUT"/snapshots.jsonl "$OUT"/kills.jsonl "$OUT"/summary.txt
+rm -f "$OUT"/orders.json "$OUT"/snapshots.jsonl "$OUT"/kills.jsonl "$OUT"/summary.txt "$OUT"/final.json
 
 # Host port of a service; a case statement keeps this runnable on the bash 3.2 that macOS ships.
 port_of() {
@@ -122,9 +123,12 @@ wait $LOADGEN
 LOADGEN=""
 log "load finished, waiting for the saga backlog to drain"
 $PY chaos/report.py drain "$OUT/orders.json" "$DRAIN_TIMEOUT" "$DRAIN_CAP" || log "drain timed out"
+# Every order with its timeline, payment and stock holds, read from the databases before teardown,
+# so the summary can audit money and stock and a failed run names what happened to each order.
+$PY chaos/report.py ledger "$OUT/orders.json" "$OUT/final.json" || log "could not read the final ledger"
 
 echo
-if $PY chaos/report.py summary "$OUT/orders.json" "$OUT/snapshots.jsonl" "$OUT/kills.jsonl"; then
+if $PY chaos/report.py summary "$OUT/orders.json" "$OUT/snapshots.jsonl" "$OUT/kills.jsonl" "$OUT/final.json"; then
   RESULT=0
 else
   RESULT=$?

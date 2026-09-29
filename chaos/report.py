@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Chaos run bookkeeping: metric snapshots, drain wait and the final summary.
+"""Chaos run bookkeeping: metric snapshots, drain wait, the final ledger and the summary.
 
 Counters live in the JVM and reset when a container is killed, so the killer
 takes a snapshot of the victim right before each kill and the report adds those
-to the final scrape. The summary opens with the provenance of the run (commit,
-time, host, Docker, profile and every knob in effect) so a recorded summary can
-be re-derived. Exit code is non zero when any order failed or is stuck, or when
-CHAOS_MAX_P95 is set and the p95 saga latency exceeds it.
+to the final scrape. Once the backlog has drained, `ledger` reads every order,
+its timeline, its payment and its stock holds straight from the three databases
+into final.json, so a failed run explains itself. The summary opens with the
+provenance of the run (commit, time, host, Docker, profile and every knob in
+effect) so a recorded summary can be re-derived, and audits that ledger: money
+and stock must follow each order's outcome. Exit code is non zero when any order
+failed or is stuck, when the ledger breaks a money or stock rule or cannot be
+read, or when CHAOS_MAX_P95 is set and the p95 saga latency exceeds it.
 """
 import json
 import os
@@ -169,7 +173,140 @@ def label(labels, key):
     return m.group(1) if m else ""
 
 
-def summary(orders_path, snapshots_path, kills_path):
+# the compose project run.sh starts; psql runs inside its postgres container
+COMPOSE = ["docker", "compose", "-p", "ledgermesh", "-f", "deploy/docker-compose.yml"]
+
+
+def rows(database, query):
+    """The rows of one query as dicts, read with psql inside the stack's postgres container."""
+    wrapped = f"select coalesce(json_agg(t), '[]'::json) from ({query}) t"
+    done = subprocess.run(COMPOSE + ["exec", "-T", "postgres", "psql", "-U", "ledgermesh", "-d",
+                                     database, "-At", "-v", "ON_ERROR_STOP=1", "-c", wrapped],
+                          capture_output=True, text=True, timeout=60)
+    if done.returncode != 0:
+        raise RuntimeError(f"{database}: {done.stderr.strip() or done.stdout.strip()}")
+    return json.loads(done.stdout)
+
+
+def by_order(records):
+    grouped = {}
+    for r in records:
+        grouped.setdefault(r.pop("order_id"), []).append(r)
+    return grouped
+
+
+def ledger(orders_path, out_path):
+    """Writes the final state of every submitted order, read from the databases rather than the
+    APIs: the order row and its timeline, the payment the payment service holds for it and the
+    stock holds the inventory ledger records for it, plus the stock rows and any order, payment or
+    hold that belongs to no submitted order."""
+    with open(orders_path) as fh:
+        submitted = json.load(fh)["submitted"]
+    orders = {r["id"]: r for r in rows(
+        "orders", "select id, status, reason, customer_id, amount::text as amount, created_at, "
+                  "updated_at, deadline_at, redrives from orders")}
+    items = by_order(rows("orders", "select order_id, sku, quantity from order_item"))
+    timeline = by_order(rows(
+        "orders", "select order_id, type, from_status, to_status, reason, occurred_at "
+                  "from order_event order by id"))
+    payments = {}
+    for p in rows("payments", "select * from payment"):
+        p["amount"] = f"{float(p['amount']):.2f}"
+        p.pop("version", None)
+        payments[p.pop("order_id")] = p
+    holds = by_order(rows(
+        "inventory", "select order_id, sku, quantity, state, created_at, released_at "
+                     "from reservation order by id"))
+    stock = rows("inventory", "select sku, available, reserved from stock_item order by sku")
+    ids = [o["id"] for o in submitted]
+    known = set(ids)
+    final = {
+        "orders": [{"id": oid, "order": orders.get(oid), "items": items.get(oid, []),
+                    "timeline": timeline.get(oid, []), "payment": payments.get(oid),
+                    "holds": holds.get(oid, [])} for oid in ids],
+        "stock": stock,
+        "strays": {
+            "orders": sorted(set(orders) - known),
+            "payments": {k: v for k, v in payments.items() if k not in known},
+            "holds": {k: v for k, v in holds.items() if k not in known},
+        },
+    }
+    with open(out_path, "w") as fh:
+        json.dump(final, fh, indent=1)
+    print(f"ledger: {len(ids)} orders, {len(payments)} payments and "
+          f"{sum(len(v) for v in holds.values())} stock holds written to {out_path}")
+
+
+def audit(final):
+    """Checks the ledger against the money and stock rules. A confirmed order holds one authorized
+    payment for its amount and exactly the stock it asked for. Any other order holds no authorized
+    payment, no open one either once it is cancelled (an open payment can still be authorized),
+    and no stock. The stock rows agree with the holds, and nothing is held or paid for an order
+    that was never submitted. Returns (order or sku, problem) pairs."""
+    problems = []
+    reserved = {}
+
+    def holding(hs):
+        held = {}
+        for h in hs:
+            if h["state"] == "RESERVED":
+                held[h["sku"]] = held.get(h["sku"], 0) + h["quantity"]
+                reserved[h["sku"]] = reserved.get(h["sku"], 0) + h["quantity"]
+        return held
+
+    for rec in final["orders"]:
+        o, pay = rec["order"], rec["payment"]
+        held = holding(rec["holds"])
+        if o is None:
+            problems.append((rec["id"], "the order service has no row for it"))
+            continue
+        paid = pay["status"] if pay else "none"
+        if o["status"] == "CONFIRMED":
+            wanted = {}
+            for i in rec["items"]:
+                wanted[i["sku"]] = wanted.get(i["sku"], 0) + i["quantity"]
+            if paid != "AUTHORIZED":
+                problems.append((rec["id"], f"confirmed with payment {paid}"))
+            elif float(pay["amount"]) != float(o["amount"]):
+                problems.append((rec["id"], f"confirmed at {o['amount']} but paid {pay['amount']}"))
+            if held != wanted:
+                problems.append((rec["id"], f"confirmed holding {held or 'nothing'} for {wanted}"))
+            continue
+        outcome = " ".join(x for x in (o["status"], o["reason"]) if x)
+        if paid == "AUTHORIZED":
+            problems.append((rec["id"], f"{outcome} but charged {pay['amount']}"))
+        elif paid in ("NEW", "DEFERRED") and o["status"] == "CANCELLED":
+            problems.append((rec["id"], f"{outcome} with its payment still {paid}"))
+        if held and o["status"] == "CANCELLED":
+            problems.append((rec["id"], f"{outcome} still holding {held}"))
+    for oid, hs in final["strays"]["holds"].items():
+        if holding(hs):
+            problems.append((oid, "stock held for an order never submitted"))
+    for s in final["stock"]:
+        if s["reserved"] != reserved.get(s["sku"], 0):
+            problems.append((s["sku"], f"stock row reserves {s['reserved']}, the holds add up to "
+                                       f"{reserved.get(s['sku'], 0)}"))
+    for oid in final["strays"]["orders"]:
+        problems.append((oid, "an order no submission returned"))
+    for oid, p in final["strays"]["payments"].items():
+        problems.append((oid, f"a {p['status']} payment for an order never submitted"))
+    return problems
+
+
+def story(rec):
+    """One order on one line: outcome, payment, holds and its timeline in seconds from creation."""
+    o, pay = rec["order"], rec["payment"]
+    start = parse_ts(o["created_at"])
+    steps = " ".join(
+        f"{e['type']}{'->' + e['to_status'] if e['to_status'] else ' ignored'}"
+        f"@{parse_ts(e['occurred_at']) - start:.1f}s" for e in rec["timeline"])
+    holds = ", ".join(f"{h['sku']} x{h['quantity']} {h['state']}" for h in rec["holds"]) or "none"
+    payment = f"{pay['status']} {pay['amount']}" if pay else "none"
+    outcome = " ".join(x for x in (o["status"], o["reason"]) if x)
+    return f"    {rec['id']} {outcome}; payment {payment}; holds {holds}; {steps}"
+
+
+def summary(orders_path, snapshots_path, kills_path, final_path=None):
     with open(orders_path) as fh:
         run = json.load(fh)
     submitted = run["submitted"]
@@ -189,6 +326,15 @@ def summary(orders_path, snapshots_path, kills_path):
     # one accepted submit per key: a retried key that placed two orders would show up here
     duplicate_orders = len(submitted) - len({o["id"] for o in submitted})
     failed = stuck + cancelled_other + len(run["submitErrors"]) + duplicate_orders
+
+    final, problems, unreadable = None, [], None
+    if final_path:
+        try:
+            with open(final_path) as fh:
+                final = json.load(fh)
+            problems = audit(final)
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            unreadable = f"{final_path}: {e}"
 
     totals = {}
     for service in SERVICES:
@@ -277,12 +423,33 @@ def summary(orders_path, snapshots_path, kills_path):
         f"  stock probes         {run['stockProbes']}",
     ]
     lines += overview_lines()
+    if final_path:
+        lines += ledger_lines(final, problems, unreadable, final_path)
     text = "\n".join(lines)
     print(text)
     os.makedirs(os.path.dirname(SUMMARY_PATH) or ".", exist_ok=True)
     with open(SUMMARY_PATH, "w") as fh:
         fh.write(text + "\n")
-    return failed + (1 if breached else 0)
+    return failed + len(problems) + (1 if unreadable else 0) + (1 if breached else 0)
+
+
+def ledger_lines(final, problems, unreadable, final_path, shown=20):
+    """The audit of the final ledger, then every order that did not end confirmed or cancelled
+    for stock and every order the audit flagged, one line each, so a red run names its orders."""
+    if unreadable:
+        return [f"  ledger               unreadable, so money and stock were not checked ({unreadable})"]
+    lines = [f"  ledger               {len(problems)} money or stock problems in {final_path}"]
+    lines += [f"    {key}: {text}" for key, text in problems[:shown]]
+    flagged = {key for key, _ in problems}
+    odd = [rec for rec in final["orders"] if rec["order"] and (
+        rec["id"] in flagged or not (rec["order"]["status"] == "CONFIRMED" or (
+            rec["order"]["status"] == "CANCELLED" and rec["order"]["reason"] == "OUT_OF_STOCK")))]
+    lines.append(f"  orders to read       {len(odd)} neither confirmed nor cancelled for stock, "
+                 "or flagged above" + (":" if odd else ""))
+    lines += [story(rec) for rec in odd[:shown]]
+    if len(odd) > shown:
+        lines.append(f"    and {len(odd) - shown} more in {final_path}")
+    return lines
 
 
 def percentile(values, p):
@@ -310,7 +477,9 @@ if __name__ == "__main__":
         snapshot(sys.argv[2], sys.argv[3])
     elif cmd == "drain":
         sys.exit(1 if wait_drain(sys.argv[2], float(sys.argv[3]), float(sys.argv[4]) if len(sys.argv) > 4 else None) else 0)
+    elif cmd == "ledger":
+        ledger(sys.argv[2], sys.argv[3])
     elif cmd == "summary":
-        sys.exit(1 if summary(sys.argv[2], sys.argv[3], sys.argv[4]) else 0)
+        sys.exit(1 if summary(*sys.argv[2:6]) else 0)
     else:
         sys.exit(f"unknown command {cmd}")
