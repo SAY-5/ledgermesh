@@ -267,7 +267,9 @@ The time limiter cuts a slow call off but cannot stop it: the call runs on and t
 on it, and a synthetic slow call approves up to `slow-millis` (3 s) after it started. The decorated
 call therefore completes its own future with the answer, and when the time limiter completed that
 future first, publishes the answer as a `LateOutcome`, which is committed like any other and
-retried if a concurrent write to the payment won the version. Every approval is a new authorization
+retried if a concurrent write to the payment won the version; a late approval that still cannot be
+committed makes a release due on the payment regardless of its version, so it cannot stay on the
+card. Every approval is a new authorization
 with a code of its own, so a timed out attempt and its retry that both approve are two holds on the
 card.
 
