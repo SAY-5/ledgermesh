@@ -266,13 +266,14 @@ The processor's answers do not always make it into the payment. The time limiter
 off but cannot stop it: the call runs on and the processor acts on it, and a synthetic slow call
 approves up to `slow-millis` (3 s) after it started. An answer's commit can also lose to a
 concurrent write on the payment's version (a void, another attempt's approval, a release being
-recorded), roll back with the transaction around it, as a re-drive's does inside the idempotent
-consumer, or die with a killed process. Every approval is a new authorization with a code of its
-own, so a timed out attempt and its retry that both approve are two holds on the card, and an
-approval whose commit was lost is a hold no payment knows it has.
+recorded), roll back with the transaction around it, or die with a killed process. (A re-drive calls
+the processor only after the consumer's transaction has committed, so its answer commits on its
+own.) Every approval is a new authorization with a code of its own, so a timed out attempt and its
+retry that both approve are two holds on the card, and an approval whose commit was lost is a hold
+no payment knows it has.
 
 So the rule that the card holds only what the payment keeps is enforced from the processor's side.
-`HoldReconciler` runs every `ledgermesh.payment.reconcile-ms` (5 s), lists the merchant's
+`HoldReconciler` runs every `ledgermesh.payment.reconcile-ms` (5 s), pages through the merchant's
 outstanding authorizations, and releases every one older than the grace period that its payment does
 not keep. A payment keeps exactly one code, the one it is authorized under, and nothing while it is
 voided, declined, open or absent: an open payment has not committed that approval and will be

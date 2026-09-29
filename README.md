@@ -225,7 +225,7 @@ final ledger, summary); the harness tears the stack down on every exit path unle
 
 ```bash
 make lint     # spotless (google-java-format)
-make test     # mvn verify: 131 unit tests + 18 integration tests
+make test     # mvn verify: 133 unit tests + 18 integration tests
 ```
 
 Unit tests (H2, no Docker): saga state machine transitions and compensation, deadline reaper (silent
@@ -247,15 +247,16 @@ off), an approval that arrives after its time limit through the real decorator b
 refused release backing off without holding up the others, the reconciler releasing every
 authorization past its grace period that the payment does not keep (voided, declined, absent, a
 surplus beside the kept code, an open payment's stale approval) and leaving a younger one and the
-kept code alone, the verifier's four races in which an answer's commit is lost, the order service
-sending an unanswered cancellation again until `payment.voided` arrives, and the upgrade repair that
-sends every unanswered cancellation again, deterministic processor, the replay cap that turns a
-record into a parked poison message, the replayer committing only the offsets it handled and waiting
-for its group assignment before it treats silence as an empty topic, the request deduplication
-store, the relay counting a send that never confirmed, the open and overdue saga counts behind the
-ops overview, saga metrics and log lines that wait for the commit, and the reservation ledger (a
-release credits what the order held, a release before the reservation is a no-op that blocks the
-late reservation, a repeated reservation takes stock once).
+kept code alone, however many pages of kept ones come before it, the verifier's four races in which
+an answer's commit is lost, the order service sending an unanswered cancellation again until
+`payment.voided` arrives, and the upgrade repair that sends every unanswered cancellation again,
+deterministic processor, the replay cap that turns a record into a parked poison message, the
+replayer committing only the offsets it handled and waiting for its group assignment before it
+treats silence as an empty topic, the request deduplication store, the relay counting a send that
+never confirmed, the open and overdue saga counts behind the ops overview, saga metrics and log
+lines that wait for the commit, and the reservation ledger (a release credits what the order held, a
+release before the reservation is a no-op that blocks the late reservation, a repeated reservation
+takes stock once).
 
 Integration tests (`e2e-tests`, Testcontainers Redpanda + Postgres + Redis, all three services
 booted in one JVM): an order flows to CONFIRMED end to end, out of stock and declined payment paths
