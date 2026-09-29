@@ -4,6 +4,14 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Repeats chaos runs on chosen seeds: every seed listed gets a chaos job of its own, and a seed
+  # listed twice runs twice, so an intermittent failure can be told from a one off. Start it with
+  #   gh workflow run ci.yml --ref <branch> -f chaos_seeds="54826 54826 1002"
+  workflow_dispatch:
+    inputs:
+      chaos_seeds:
+        description: "CHAOS_SEED of each chaos job, space separated; empty runs one job on a fresh seed"
+        default: ""
 
 jobs:
   test:
@@ -40,19 +48,44 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  chaos:
-    needs: test
+  chaos-plan:
     runs-on: ubuntu-latest
+    outputs:
+      runs: ${{ steps.plan.outputs.runs }}
+    steps:
+      - id: plan
+        env:
+          SEEDS: ${{ inputs.chaos_seeds }}
+        run: |
+          python3 - >> "$GITHUB_OUTPUT" <<'EOF'
+          import json, os
+          seeds = os.environ.get("SEEDS", "").split()
+          if not all(s.isdigit() for s in seeds):
+              raise SystemExit(f"every CHAOS_SEED must be a whole number: {seeds}")
+          runs = [{"run": i + 1, "seed": s} for i, s in enumerate(seeds)] or [{"run": 1, "seed": ""}]
+          print("runs=" + json.dumps(runs))
+          EOF
+
+  chaos:
+    needs: [test, chaos-plan]
+    name: ${{ matrix.seed && format('chaos (seed {0}, run {1})', matrix.seed, matrix.run) || 'chaos' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.chaos-plan.outputs.runs) }}
     env:
       # a ceiling, not an expected value: see the chaos section of the README
       CHAOS_MAX_P95: "90000"
+      # empty unless a dispatch named one, and run.sh draws a fresh seed when it is empty
+      CHAOS_SEED: ${{ matrix.seed }}
     steps:
       - uses: actions/checkout@v4
       - run: make chaos
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: chaos-report
+          name: chaos-report-${{ matrix.run }}
           path: chaos/out/
 
   web:

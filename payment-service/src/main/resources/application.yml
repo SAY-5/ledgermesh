@@ -45,6 +45,11 @@ ledgermesh:
   payment:
     sweep-grace: 3s
     sweep-ms: 1000
+    # Courtesy window added to the longest processor call, not a maximum commit duration.
+    # Durable retirement rejects a later answer; failures/backlog can delay release beyond it.
+    reconcile:
+      commit-allowance: 5s
+    reconcile-ms: 5000
     retry-delay: 2s
   outbox:
     poll-ms: 200

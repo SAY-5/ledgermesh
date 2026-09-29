@@ -1,12 +1,26 @@
 #!/usr/bin/env python3
-"""Chaos run bookkeeping: metric snapshots, drain wait and the final summary.
+"""Chaos run bookkeeping: metric snapshots, drain wait, the final ledger and the summary.
 
 Counters live in the JVM and reset when a container is killed, so the killer
 takes a snapshot of the victim right before each kill and the report adds those
-to the final scrape. The summary opens with the provenance of the run (commit,
-time, host, Docker, profile and every knob in effect) so a recorded summary can
-be re-derived. Exit code is non zero when any order failed or is stuck, or when
-CHAOS_MAX_P95 is set and the p95 saga latency exceeds it.
+to the final scrape. Once the backlog has drained, `ledger` reads every order,
+its timeline, its payment and its stock holds straight from the three databases
+into final.json, so a failed run explains itself. The summary opens with the
+provenance of the run (commit, time, host, Docker, profile and every knob in
+effect) so a recorded summary can be re-derived, and audits that ledger: money
+and stock must follow each order's outcome.
+
+What a run guarantees: every submitted order reaches CONFIRMED or CANCELLED;
+a confirmed order is paid once, for its amount, holds its stock, and is the
+only kind of order the processor still holds an authorization for; a cancelled
+order is charged nothing, holds nothing, has nothing held for it on the card,
+and, unless it was cancelled for stock, has had its cancellation answered by
+the payment service. An order is cancelled only for stock or because its saga
+outlived a deadline (RESERVATION_TIMEOUT, PAYMENT_TIMEOUT), and a deadline
+cancellation is reported as a class of its own. Exit code is non
+zero when an order is stuck or cancelled for another reason, when a submission
+was refused or placed twice, when the ledger breaks a money or stock rule or
+cannot be read, or when CHAOS_MAX_P95 is set and the p95 saga latency exceeds it.
 """
 import json
 import os
@@ -24,6 +38,8 @@ SERVICES = {
     "payment-service": "http://localhost:" + os.environ.get("LEDGERMESH_PAYMENT_PORT", "8083"),
 }
 TERMINAL = {"CONFIRMED", "CANCELLED"}
+# the saga deadlines the reaper enforces; cancelling for one of these is compensated, not failed
+DEADLINES = ("RESERVATION_TIMEOUT", "PAYMENT_TIMEOUT")
 LINE = re.compile(r'^([a-zA-Z_:][\w:]*)(\{[^}]*\})?\s+([-+eE.\d]+)$')
 KNOBS = ["CHAOS_PROFILE", "CHAOS_DURATION", "CHAOS_RATE", "CHAOS_KILLS", "CHAOS_RESTART_AFTER",
          "CHAOS_VICTIMS", "CHAOS_SEED", "CHAOS_DRAIN_TIMEOUT", "CHAOS_DRAIN_CAP", "CHAOS_MAX_P95"]
@@ -47,7 +63,13 @@ def scrape(service):
             continue
         name, labels, value = m.group(1), m.group(2) or "", float(m.group(3))
         if name in ("ledgermesh_breaker_transitions_total", "resilience4j_retry_calls_total",
-                    "ledgermesh_payments_deferred_total", "ledgermesh_consumer_duplicates_total",
+                    "ledgermesh_payments_deferred_total", "ledgermesh_payments_voided_total",
+                    "ledgermesh_payments_surplus_approvals_total",
+                    "ledgermesh_payments_late_outcomes_total",
+                    "ledgermesh_payments_reconciled_released_total",
+                    "ledgermesh_payments_releases_total",
+                    "ledgermesh_saga_cancellations_resent_total",
+                    "ledgermesh_consumer_duplicates_total",
                     "ledgermesh_outbox_published_total", "ledgermesh_inventory_releases_total",
                     "ledgermesh_requests_replayed_total"):
             counters[name + labels] = value
@@ -169,7 +191,261 @@ def label(labels, key):
     return m.group(1) if m else ""
 
 
-def summary(orders_path, snapshots_path, kills_path):
+# the compose project run.sh starts; psql runs inside its postgres container
+COMPOSE = ["docker", "compose", "-p", "ledgermesh", "-f", "deploy/docker-compose.yml"]
+
+
+def rows(database, query):
+    """The rows of one query as dicts, read with psql inside the stack's postgres container."""
+    wrapped = f"select coalesce(json_agg(t), '[]'::json) from ({query}) t"
+    done = subprocess.run(COMPOSE + ["exec", "-T", "postgres", "psql", "-U", "ledgermesh", "-d",
+                                     database, "-At", "-v", "ON_ERROR_STOP=1", "-c", wrapped],
+                          capture_output=True, text=True, timeout=60)
+    if done.returncode != 0:
+        raise RuntimeError(f"{database}: {done.stderr.strip() or done.stdout.strip()}")
+    return json.loads(done.stdout)
+
+
+def by_order(records):
+    grouped = {}
+    for r in records:
+        grouped.setdefault(r.pop("order_id"), []).append(r)
+    return grouped
+
+
+def ledger(orders_path, out_path, settle=None):
+    """Writes the final state of every submitted order, read from the databases rather than the
+    APIs: the order row and its timeline, the payment the payment service holds for it and the
+    stock holds the inventory ledger records for it, plus the stock rows and any order, payment or
+    hold that belongs to no submitted order.
+
+    A cancellation is terminal before it is compensated: the release and the void travel on
+    order.cancelled after the order has turned CANCELLED, which is all the drain waits for. So a
+    ledger that breaks a money or stock rule is read again every 2 s, and the one written is the
+    first that keeps every rule, or the last read once `settle` seconds pass without the number
+    of broken rules falling (or four times that in all).
+
+    Before the first read it waits the payment service's reconciliation grace period plus one
+    interval: an authorization no payment keeps, such as an approval whose commit was lost, is
+    released only once it is older than the grace period, by the next reconciliation after that.
+    Reading earlier could pass a ledger that such an authorization is about to break, or fail one
+    the reconciler is about to repair."""
+    with open(orders_path) as fh:
+        submitted = json.load(fh)["submitted"]
+    inflight = inflight_wait()
+    print(f"ledger: waiting {inflight:.0f}s, the reconciliation grace period and one interval",
+          flush=True)
+    time.sleep(inflight)
+    started = last_progress = time.time()
+    fewest = None
+    while True:
+        final = read_ledger(submitted)
+        broken = len(audit(final))
+        if fewest is None or broken < fewest:
+            fewest, last_progress = broken, time.time()
+        now = time.time()
+        if not broken or not settle or now - last_progress >= settle or now - started >= settle * 4:
+            break
+        print(f"ledger: {broken} money or stock rules broken, waiting for compensations", flush=True)
+        time.sleep(2)
+    with open(out_path, "w") as fh:
+        json.dump(final, fh, indent=1)
+    print(f"ledger: {len(submitted)} orders written to {out_path}, {broken} money or stock rules "
+          f"broken", flush=True)
+
+
+def inflight_wait():
+    """Seconds to wait before reading the ledger: the payment service's reconciliation grace period
+    plus one reconciliation interval plus 2 s, so that every authorization no payment keeps has
+    been past the grace period for a whole interval and a reconciliation has run over it. The two
+    figures are the payment service's own gauges, which it derives from its configuration; if they
+    cannot be read, the same derivation is made from its application.yml. CHAOS_INFLIGHT_WAIT
+    overrides it."""
+    if os.environ.get("CHAOS_INFLIGHT_WAIT"):
+        return float(os.environ["CHAOS_INFLIGHT_WAIT"])
+    gauges = {}
+    try:
+        for line in fetch(f"{SERVICES['payment-service']}/actuator/prometheus").splitlines():
+            m = LINE.match(line)
+            if m and m.group(1) in ("ledgermesh_payments_reconcile_grace_seconds",
+                                    "ledgermesh_payments_reconcile_interval_seconds"):
+                gauges[m.group(1)] = float(m.group(3))
+    except Exception:  # noqa: BLE001
+        pass
+    grace = gauges.get("ledgermesh_payments_reconcile_grace_seconds")
+    interval = gauges.get("ledgermesh_payments_reconcile_interval_seconds")
+    if grace is None or interval is None:
+        grace, interval = configured_reconciliation()
+    return grace + interval + 2.0
+
+
+def configured_reconciliation():
+    """The grace period and interval as the payment service derives them: the longest of its time
+    limits and the synthetic processor's slow-millis, plus the commit allowance; and reconcile-ms."""
+    yml = open("payment-service/src/main/resources/application.yml").read()
+
+    def seconds(value):
+        value = re.sub(r"^\$\{[A-Z_]+:(.*)\}$", r"\1", value.strip())
+        if value.endswith("ms"):
+            return float(value[:-2]) / 1000
+        if value.endswith("s"):
+            return float(value[:-1])
+        return float(value) / 1000
+
+    limits = [seconds(v) for v in re.findall(r"timeout-duration:\s*(\S+)", yml)]
+    slow = re.search(r"slow-millis:\s*(?:\$\{[A-Z_]+:)?(\d+)", yml)
+    call = max(limits + ([int(slow.group(1)) / 1000] if slow else []) or [5.0])
+    allowance = re.search(r"commit-allowance:\s*(\S+)", yml)
+    interval = re.search(r"reconcile-ms:\s*(?:\$\{[A-Z_]+:)?(\d+)", yml)
+    return (call + (seconds(allowance.group(1)) if allowance else 5.0),
+            int(interval.group(1)) / 1000 if interval else 5.0)
+
+
+def read_ledger(submitted):
+    orders = {r["id"]: r for r in rows(
+        "orders", "select id, status, reason, customer_id, amount::text as amount, created_at, "
+                  "updated_at, deadline_at, redrives, compensation_due_at, compensated_at "
+                  "from orders")}
+    items = by_order(rows("orders", "select order_id, sku, quantity from order_item"))
+    timeline = by_order(rows(
+        "orders", "select order_id, type, from_status, to_status, reason, occurred_at "
+                  "from order_event order by id"))
+    payments = {}
+    for p in rows("payments", "select * from payment"):
+        p["amount"] = f"{float(p['amount']):.2f}"
+        p.pop("version", None)
+        payments[p.pop("order_id")] = p
+    holds = by_order(rows(
+        "inventory", "select order_id, sku, quantity, state, created_at, released_at "
+                     "from reservation order by id"))
+    stock = rows("inventory", "select sku, available, reserved from stock_item order by sku")
+    # what the processor granted, kept apart from the payment service's own rows
+    card = by_order(rows(
+        "payments", "select order_id, authorization_code, amount::text as amount, state, "
+                    "granted_at, released_at from processor_hold order by granted_at"))
+    for hs in card.values():
+        for h in hs:
+            h["amount"] = f"{float(h['amount']):.2f}"
+    ids = [o["id"] for o in submitted]
+    known = set(ids)
+    final = {
+        "orders": [{"id": oid, "order": orders.get(oid), "items": items.get(oid, []),
+                    "timeline": timeline.get(oid, []), "payment": payments.get(oid),
+                    "holds": holds.get(oid, []), "card": card.get(oid, [])} for oid in ids],
+        "stock": stock,
+        "strays": {
+            "orders": sorted(set(orders) - known),
+            "payments": {k: v for k, v in payments.items() if k not in known},
+            "holds": {k: v for k, v in holds.items() if k not in known},
+            "card": {k: v for k, v in card.items() if k not in known},
+        },
+    }
+    return final
+
+
+def audit(final):
+    """Checks the ledger against the money and stock rules. A confirmed order holds one authorized
+    payment for its amount and exactly the stock it asked for. Any other order holds no authorized
+    payment, no open one either once it is cancelled (an open payment can still be authorized),
+    and no stock. An order cancelled for anything but stock sent order.cancelled, and both of its
+    readers must have answered it: the payment voided or declined, and a released row or marker in
+    the inventory ledger, since until then a late reservation could still take stock or money. The
+    stock rows agree with the holds, and nothing is held or paid for an order that was never
+    submitted. On the processor's side, a confirmed order has exactly its one authorization
+    outstanding, for its amount and under the code its payment carries, and no other order has
+    any; a cancellation that emitted order.cancelled must have been answered with payment.voided,
+    since until then the order service keeps sending it. Returns (order or sku, problem) pairs."""
+    problems = []
+    reserved = {}
+
+    def holding(hs):
+        held = {}
+        for h in hs:
+            if h["state"] == "RESERVED":
+                held[h["sku"]] = held.get(h["sku"], 0) + h["quantity"]
+                reserved[h["sku"]] = reserved.get(h["sku"], 0) + h["quantity"]
+        return held
+
+    for rec in final["orders"]:
+        o, pay = rec["order"], rec["payment"]
+        held = holding(rec["holds"])
+        if o is None:
+            problems.append((rec["id"], "the order service has no row for it"))
+            continue
+        paid = pay["status"] if pay else "none"
+        if o["status"] == "CONFIRMED":
+            wanted = {}
+            for i in rec["items"]:
+                wanted[i["sku"]] = wanted.get(i["sku"], 0) + i["quantity"]
+            if paid != "AUTHORIZED":
+                problems.append((rec["id"], f"confirmed with payment {paid}"))
+            elif float(pay["amount"]) != float(o["amount"]):
+                problems.append((rec["id"], f"confirmed at {o['amount']} but paid {pay['amount']}"))
+            if held != wanted:
+                problems.append((rec["id"], f"confirmed holding {held or 'nothing'} for {wanted}"))
+            on_card = [h for h in rec.get("card", []) if h["state"] == "OUTSTANDING"]
+            if len(on_card) != 1:
+                problems.append((rec["id"], f"confirmed with {len(on_card)} authorizations "
+                                            f"outstanding at the processor"))
+            elif pay and (on_card[0]["authorization_code"] != pay.get("authorization_code")
+                          or float(on_card[0]["amount"]) != float(o["amount"])):
+                problems.append((rec["id"], f"confirmed, but the processor holds "
+                                            f"{on_card[0]['amount']} under "
+                                            f"{on_card[0]['authorization_code']}"))
+            continue
+        outcome = " ".join(x for x in (o["status"], o["reason"]) if x)
+        compensated = o["status"] == "CANCELLED" and o["reason"] != "OUT_OF_STOCK"
+        if paid == "AUTHORIZED":
+            problems.append((rec["id"], f"{outcome} but charged {pay['amount']}"))
+        elif paid in ("NEW", "DEFERRED") and o["status"] == "CANCELLED":
+            problems.append((rec["id"], f"{outcome} with its payment still {paid}"))
+        elif compensated and paid not in ("VOIDED", "DECLINED"):
+            problems.append((rec["id"], f"{outcome} but the payment service never voided it "
+                                        f"(payment {paid})"))
+        if held and o["status"] == "CANCELLED":
+            problems.append((rec["id"], f"{outcome} still holding {held}"))
+        elif compensated and not rec["holds"]:
+            problems.append((rec["id"], f"{outcome} but inventory never released it"))
+        on_card = [h for h in rec.get("card", []) if h["state"] == "OUTSTANDING"]
+        if on_card:
+            problems.append((rec["id"], f"{outcome} but the processor still holds "
+                                        f"{', '.join(h['amount'] for h in on_card)} on the card"))
+        if compensated and not o.get("compensated_at"):
+            problems.append((rec["id"], f"{outcome} but payment.voided never answered its "
+                                        f"cancellation"))
+    for oid, hs in final["strays"]["holds"].items():
+        if holding(hs):
+            problems.append((oid, "stock held for an order never submitted"))
+    for s in final["stock"]:
+        if s["reserved"] != reserved.get(s["sku"], 0):
+            problems.append((s["sku"], f"stock row reserves {s['reserved']}, the holds add up to "
+                                       f"{reserved.get(s['sku'], 0)}"))
+    for oid in final["strays"]["orders"]:
+        problems.append((oid, "an order no submission returned"))
+    for oid, p in final["strays"]["payments"].items():
+        problems.append((oid, f"a {p['status']} payment for an order never submitted"))
+    for oid, hs in final["strays"].get("card", {}).items():
+        if any(h["state"] == "OUTSTANDING" for h in hs):
+            problems.append((oid, "an authorization outstanding for an order never submitted"))
+    return problems
+
+
+def story(rec):
+    """One order on one line: outcome, payment, holds and its timeline in seconds from creation."""
+    o, pay = rec["order"], rec["payment"]
+    start = parse_ts(o["created_at"])
+    steps = " ".join(
+        f"{e['type']}{'->' + e['to_status'] if e['to_status'] else ' ignored'}"
+        f"@{parse_ts(e['occurred_at']) - start:.1f}s" for e in rec["timeline"])
+    holds = ", ".join(f"{h['sku']} x{h['quantity']} {h['state']}" for h in rec["holds"]) or "none"
+    payment = f"{pay['status']} {pay['amount']}" if pay else "none"
+    card = ", ".join(f"{h['amount']} {h['state']}" for h in rec.get("card", [])) or "nothing"
+    outcome = " ".join(x for x in (o["status"], o["reason"]) if x)
+    return (f"    {rec['id']} {outcome}; payment {payment}; card {card}; holds {holds}; "
+            f"{steps}")
+
+
+def summary(orders_path, snapshots_path, kills_path, final_path=None):
     with open(orders_path) as fh:
         run = json.load(fh)
     submitted = run["submitted"]
@@ -184,11 +460,25 @@ def summary(orders_path, snapshots_path, kills_path):
             latencies.append((updated - created) * 1000.0)
     confirmed = sum(1 for s, _ in states.values() if s == "CONFIRMED")
     cancelled_stock = sum(1 for s, r in states.values() if s == "CANCELLED" and r == "OUT_OF_STOCK")
-    cancelled_other = sum(1 for s, r in states.values() if s == "CANCELLED" and r != "OUT_OF_STOCK")
+    deadline = {}
+    for s, r in states.values():
+        if s == "CANCELLED" and r in DEADLINES:
+            deadline[r] = deadline.get(r, 0) + 1
+    cancelled_other = sum(1 for s, r in states.values()
+                          if s == "CANCELLED" and r != "OUT_OF_STOCK" and r not in DEADLINES)
     stuck = sum(1 for s, _ in states.values() if s not in TERMINAL)
     # one accepted submit per key: a retried key that placed two orders would show up here
     duplicate_orders = len(submitted) - len({o["id"] for o in submitted})
     failed = stuck + cancelled_other + len(run["submitErrors"]) + duplicate_orders
+
+    final, problems, unreadable = None, [], None
+    if final_path:
+        try:
+            with open(final_path) as fh:
+                final = json.load(fh)
+            problems = audit(final)
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            unreadable = f"{final_path}: {e}"
 
     totals = {}
     for service in SERVICES:
@@ -216,7 +506,10 @@ def summary(orders_path, snapshots_path, kills_path):
     transitions = []
     retries = {"successful_with_retry": 0, "failed_with_retry": 0, "successful_without_retry": 0,
                "failed_without_retry": 0}
-    deferred = duplicates = releases = release_noops = replayed = 0
+    deferred = voided = surplus = late = reconciled = resent = duplicates = releases = 0
+    release_noops = 0
+    replayed = 0
+    card_releases = {}
     for service, counters in totals.items():
         for key, value in counters.items():
             name, _, labels = key.partition("{")
@@ -228,6 +521,19 @@ def summary(orders_path, snapshots_path, kills_path):
                 retries[label(labels, "kind")] = retries.get(label(labels, "kind"), 0) + int(value)
             elif name == "ledgermesh_payments_deferred_total":
                 deferred += int(value)
+            elif name == "ledgermesh_payments_voided_total":
+                voided += int(value)
+            elif name == "ledgermesh_payments_surplus_approvals_total":
+                surplus += int(value)
+            elif name == "ledgermesh_payments_late_outcomes_total":
+                late += int(value)
+            elif name == "ledgermesh_payments_reconciled_released_total":
+                reconciled += int(value)
+            elif name == "ledgermesh_payments_releases_total":
+                result = label(labels, "result")
+                card_releases[result] = card_releases.get(result, 0) + int(value)
+            elif name == "ledgermesh_saga_cancellations_resent_total":
+                resent += int(value)
             elif name == "ledgermesh_consumer_duplicates_total":
                 duplicates += int(value)
             elif name == "ledgermesh_inventory_releases_total":
@@ -254,6 +560,8 @@ def summary(orders_path, snapshots_path, kills_path):
         f"  orders submitted     {len(submitted)}",
         f"  confirmed            {confirmed}",
         f"  cancelled (stock)    {cancelled_stock}",
+        f"  cancelled (deadline) {sum(deadline.values())}"
+        + (f"  ({deadline_detail(deadline, final)})" if deadline else ""),
         f"  failed / stuck       {failed}",
         f"  kills                {len(kills)}  ({timeline})" if kills else "  kills                0  (baseline, no kills)",
         f"  saga latency         p50 {p50:.0f} ms   p95 {p95:.0f} ms   max {pmax:.0f} ms",
@@ -269,7 +577,12 @@ def summary(orders_path, snapshots_path, kills_path):
         f"  deferred payments    {deferred}",
         f"  duplicate events     {duplicates} ignored by idempotent consumers",
         f"  compensations        {releases} reservations released, {release_noops} releases for orders "
-        f"that held nothing",
+        f"that held nothing, {voided} payments voided, {resent} cancellations sent again",
+        "  processor releases   " + (", ".join(f"{n} {result}" for result, n in
+                                              sorted(card_releases.items()))
+                                     if card_releases else "none")
+        + f"; {late} answers after their time limit, {surplus} approvals not kept; "
+        f"{reconciled} released by the reconciler",
         f"  resubmits            {run.get('resubmits', 0)} retried submits over "
         f"{run.get('retriedOrders', 0)} orders, {run.get('replayedAnswers', 0)} answered from the "
         f"idempotency store ({replayed} replays counted by the service), "
@@ -277,12 +590,53 @@ def summary(orders_path, snapshots_path, kills_path):
         f"  stock probes         {run['stockProbes']}",
     ]
     lines += overview_lines()
+    if final_path:
+        lines += ledger_lines(final, problems, unreadable, final_path)
     text = "\n".join(lines)
     print(text)
     os.makedirs(os.path.dirname(SUMMARY_PATH) or ".", exist_ok=True)
     with open(SUMMARY_PATH, "w") as fh:
         fh.write(text + "\n")
-    return failed + (1 if breached else 0)
+    return failed + len(problems) + (1 if unreadable else 0) + (1 if breached else 0)
+
+
+def deadline_detail(counts, final):
+    """The reasons behind the deadline cancellations and, from the ledger, what their payments
+    and stock holds ended as."""
+    text = ", ".join(f"{reason} {n}" for reason, n in sorted(counts.items()))
+    if not final:
+        return text
+    payments, held, on_card, answered = {}, 0, 0, 0
+    for rec in final["orders"]:
+        o = rec["order"]
+        if o and o["status"] == "CANCELLED" and o["reason"] in DEADLINES:
+            state = rec["payment"]["status"] if rec["payment"] else "none"
+            payments[state] = payments.get(state, 0) + 1
+            held += sum(1 for h in rec["holds"] if h["state"] == "RESERVED")
+            on_card += sum(1 for h in rec.get("card", []) if h["state"] == "OUTSTANDING")
+            answered += 1 if o.get("compensated_at") else 0
+    paid = ", ".join(f"{state} {n}" for state, n in sorted(payments.items()))
+    return (f"{text}; payments {paid}; authorizations left on cards {on_card}; stock holds left "
+            f"{held}; answered by payment.voided {answered}")
+
+
+def ledger_lines(final, problems, unreadable, final_path, shown=20):
+    """The audit of the final ledger, then every order that did not end confirmed or cancelled
+    for stock and every order the audit flagged, one line each, so a red run names its orders."""
+    if unreadable:
+        return [f"  ledger               unreadable, so money and stock were not checked ({unreadable})"]
+    lines = [f"  ledger               {len(problems)} money or stock problems in {final_path}"]
+    lines += [f"    {key}: {text}" for key, text in problems[:shown]]
+    flagged = {key for key, _ in problems}
+    odd = [rec for rec in final["orders"] if rec["order"] and (
+        rec["id"] in flagged or not (rec["order"]["status"] == "CONFIRMED" or (
+            rec["order"]["status"] == "CANCELLED" and rec["order"]["reason"] == "OUT_OF_STOCK")))]
+    lines.append(f"  orders to read       {len(odd)} neither confirmed nor cancelled for stock, "
+                 "or flagged above" + (":" if odd else ""))
+    lines += [story(rec) for rec in odd[:shown]]
+    if len(odd) > shown:
+        lines.append(f"    and {len(odd) - shown} more in {final_path}")
+    return lines
 
 
 def percentile(values, p):
@@ -310,7 +664,9 @@ if __name__ == "__main__":
         snapshot(sys.argv[2], sys.argv[3])
     elif cmd == "drain":
         sys.exit(1 if wait_drain(sys.argv[2], float(sys.argv[3]), float(sys.argv[4]) if len(sys.argv) > 4 else None) else 0)
+    elif cmd == "ledger":
+        ledger(sys.argv[2], sys.argv[3], float(sys.argv[4]) if len(sys.argv) > 4 else None)
     elif cmd == "summary":
-        sys.exit(1 if summary(sys.argv[2], sys.argv[3], sys.argv[4]) else 0)
+        sys.exit(1 if summary(*sys.argv[2:6]) else 0)
     else:
         sys.exit(f"unknown command {cmd}")

@@ -15,7 +15,8 @@ public sealed interface DomainEvent
         InventoryReserved,
         InventoryRejected,
         PaymentCompleted,
-        PaymentFailed {
+        PaymentFailed,
+        PaymentVoided {
 
   String eventId();
 

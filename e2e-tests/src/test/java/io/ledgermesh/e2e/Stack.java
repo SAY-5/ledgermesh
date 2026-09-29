@@ -46,6 +46,9 @@ public final class Stack {
   static final int DLQ_ATTEMPTS = 3;
   static final int DLQ_MAX_REPLAYS = 1;
 
+  /** How long a cancellation waits for payment.voided before the reaper sends it again. */
+  static final int COMPENSATION_SECONDS = 10;
+
   /**
    * The three services share one classpath in this JVM, so the Redis starter that only the
    * inventory service declares would also auto-configure a Redis client, and a Redis health check,
@@ -122,7 +125,8 @@ public final class Stack {
         "orders",
         orderPort,
         NO_REDIS,
-        "ledgermesh.inventory.url=http://localhost:" + inventoryPort);
+        "ledgermesh.inventory.url=http://localhost:" + inventoryPort,
+        "ledgermesh.saga.compensation=" + COMPENSATION_SECONDS + "s");
   }
 
   private static ConfigurableApplicationContext boot(

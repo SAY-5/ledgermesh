@@ -14,6 +14,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Component;
 
 /**
@@ -34,10 +35,12 @@ public class ResilientProcessorCall {
   private static final Logger log = LoggerFactory.getLogger(ResilientProcessorCall.class);
 
   private final PaymentProcessor processor;
+  private final ApplicationEventPublisher events;
   private final Executor executor = Executors.newVirtualThreadPerTaskExecutor();
 
-  public ResilientProcessorCall(PaymentProcessor processor) {
+  public ResilientProcessorCall(PaymentProcessor processor, ApplicationEventPublisher events) {
     this.processor = processor;
+    this.events = events;
   }
 
   @Retry(name = RESILIENCE_NAME, fallbackMethod = "defer")
@@ -45,16 +48,7 @@ public class ResilientProcessorCall {
   @TimeLimiter(name = RESILIENCE_NAME)
   public CompletableFuture<AuthorizationOutcome> authorize(
       String orderId, String customerId, BigDecimal amount, AtomicInteger attempts) {
-    return CompletableFuture.supplyAsync(
-        () -> {
-          int attempt = attempts.incrementAndGet();
-          Result result = processor.authorize(orderId, customerId, amount, attempt);
-          return switch (result) {
-            case Approved a -> new AuthorizationOutcome.Authorized(a.authorizationCode());
-            case Declined d -> new AuthorizationOutcome.Declined(d.reason());
-          };
-        },
-        executor);
+    return call(orderId, customerId, amount, attempts);
   }
 
   /**
@@ -67,16 +61,54 @@ public class ResilientProcessorCall {
   @TimeLimiter(name = DEFERRED_NAME)
   public CompletableFuture<AuthorizationOutcome> authorizeDeferred(
       String orderId, String customerId, BigDecimal amount, AtomicInteger attempts) {
-    return CompletableFuture.supplyAsync(
+    return call(orderId, customerId, amount, attempts);
+  }
+
+  /**
+   * Releases what the processor holds under the order's reference but {@code keep}, behind the same
+   * breaker and the longer time limit. A release cut off by the time limit may still happen; the
+   * release stays due and asking again releases nothing more.
+   */
+  @CircuitBreaker(name = RESILIENCE_NAME)
+  @TimeLimiter(name = DEFERRED_NAME)
+  public CompletableFuture<Integer> release(String orderId, String keep) {
+    return CompletableFuture.supplyAsync(() -> processor.release(orderId, keep), executor);
+  }
+
+  /**
+   * One processor call. The time limiter completes the returned future exceptionally when it cuts
+   * the call off, but cannot stop it: the call runs on and the processor acts on it. Its answer
+   * then finds the future already completed and is published as a {@link LateOutcome} instead of
+   * being dropped, so an approval nobody waited for still reaches the payment.
+   */
+  private CompletableFuture<AuthorizationOutcome> call(
+      String orderId, String customerId, BigDecimal amount, AtomicInteger attempts) {
+    CompletableFuture<AuthorizationOutcome> answer = new CompletableFuture<>();
+    executor.execute(
         () -> {
-          int attempt = attempts.incrementAndGet();
-          Result result = processor.authorize(orderId, customerId, amount, attempt);
-          return switch (result) {
-            case Approved a -> new AuthorizationOutcome.Authorized(a.authorizationCode());
-            case Declined d -> new AuthorizationOutcome.Declined(d.reason());
-          };
-        },
-        executor);
+          AuthorizationOutcome outcome;
+          try {
+            int attempt = attempts.incrementAndGet();
+            Result result = processor.authorize(orderId, customerId, amount, attempt);
+            outcome =
+                switch (result) {
+                  case Approved a -> new AuthorizationOutcome.Authorized(a.authorizationCode());
+                  case Declined d -> new AuthorizationOutcome.Declined(d.reason());
+                };
+          } catch (Throwable e) {
+            answer.completeExceptionally(e);
+            return;
+          }
+          if (!answer.complete(outcome)) {
+            log.warn("processor answered order {} after its time limit: {}", orderId, outcome);
+            try {
+              events.publishEvent(new LateOutcome(orderId, outcome));
+            } catch (RuntimeException e) {
+              log.error("late answer for order {} could not be handled", orderId, e);
+            }
+          }
+        });
+    return answer;
   }
 
   @SuppressWarnings("unused")

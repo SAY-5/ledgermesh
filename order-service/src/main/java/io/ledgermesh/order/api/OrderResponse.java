@@ -17,7 +17,8 @@ public record OrderResponse(
     Instant createdAt,
     Instant updatedAt,
     Instant deadlineAt,
-    int redrives) {
+    int redrives,
+    Instant compensatedAt) {
 
   public record Line(String sku, int quantity, BigDecimal unitPrice) {}
 
@@ -35,6 +36,7 @@ public record OrderResponse(
         order.getCreatedAt(),
         order.getUpdatedAt(),
         order.getDeadlineAt(),
-        order.getRedrives());
+        order.getRedrives(),
+        order.getCompensatedAt());
   }
 }

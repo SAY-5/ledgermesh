@@ -20,6 +20,8 @@ ledgermesh:
     metrics: false
   payment:
     sweeper: false
+    # tests reconcile by hand, at the moment they choose
+    reconcile-ms: 3600000
     sweep-grace: 0s
     retry-delay: 0s
   processor:
