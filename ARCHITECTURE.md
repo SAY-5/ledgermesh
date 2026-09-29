@@ -292,7 +292,7 @@ meters:
 | `ledgermesh.saga.latency` | order | creation to terminal state, p50/p95/p99 |
 | `ledgermesh.saga.redrives` | order | payments asked for again by the reaper |
 | `ledgermesh.saga.stuck` | order | open orders past the deadline of their current step |
-| `ledgermesh.payments.redriven{state}` | payment | re-drives answered for open or settled payments |
+| `ledgermesh.payments.redriven{state}` | payment | re-drives answered for open, settled or voided payments |
 | `ledgermesh.outbox.backlog`, `.published`, `.send.failures`, `.resends` | all | relay health |
 | `ledgermesh.requests.replayed` | order | answers served from the idempotency store |
 | `ledgermesh.consumer.duplicates` | all | redeliveries ignored |

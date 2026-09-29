@@ -100,7 +100,9 @@ public class PaymentService {
   /**
    * Answers a re-drive from the order service. A settled payment has its outcome event emitted
    * again under a fresh event id, since the first copy evidently never applied; an open payment is
-   * attempted right away; an unknown one is recorded from the request and attempted.
+   * attempted right away; an unknown one is recorded from the request and attempted. A voided
+   * payment belongs to an order that is already cancelled, which no outcome can move, so it is
+   * answered with nothing rather than with a decline it never had.
    */
   public PaymentStatus requestAgain(PaymentRequested event, String correlationId) {
     Payment payment =
@@ -121,6 +123,11 @@ public class PaymentService {
     if (payment.getStatus().isOpen()) {
       meters.counter("ledgermesh.payments.redriven", "state", "open").increment();
       return attempt(event.orderId(), true).orElse(payment.getStatus());
+    }
+    if (payment.getStatus() == PaymentStatus.VOIDED) {
+      meters.counter("ledgermesh.payments.redriven", "state", "voided").increment();
+      log.info("payment for order {} was voided, re-drive left unanswered", event.orderId());
+      return PaymentStatus.VOIDED;
     }
     tx.executeWithoutResult(status -> reemit(payment));
     meters.counter("ledgermesh.payments.redriven", "state", "settled").increment();

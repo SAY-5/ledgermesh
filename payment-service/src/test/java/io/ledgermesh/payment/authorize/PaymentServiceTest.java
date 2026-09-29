@@ -325,9 +325,7 @@ class PaymentServiceTest {
     assertThat(marker.getAmount()).isEqualByComparingTo("0");
     assertThat(marker.getAttempts()).isZero();
     verify(processor, never()).authorize(anyString(), anyString(), any(), anyInt());
-    assertThat(outbox.findAll())
-        .extracting(OutboxEvent::getTopic)
-        .doesNotContain(Topics.PAYMENT_COMPLETED);
+    assertThat(outbox.count()).isZero();
   }
 
   @Test
