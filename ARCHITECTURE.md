@@ -262,32 +262,42 @@ The marker is inserted like a payment, so a race with either creator ends on the
 redelivery onto the winner's row. Whatever it found, the cancellation is answered with
 `payment.voided` in the same transaction.
 
-Every answer the processor gives reaches the payment, including the ones nobody was waiting for.
-The time limiter cuts a slow call off but cannot stop it: the call runs on and the processor acts
-on it, and a synthetic slow call approves up to `slow-millis` (3 s) after it started. The decorated
-call therefore completes its own future with the answer, and when the time limiter completed that
-future first, publishes the answer as a `LateOutcome`, which is committed like any other and
-retried if a concurrent write to the payment won the version; a late approval that still cannot be
-committed makes a release due on the payment regardless of its version, so it cannot stay on the
-card. Every approval is a new authorization
-with a code of its own, so a timed out attempt and its retry that both approve are two holds on the
-card.
+The processor's answers do not always make it into the payment. The time limiter cuts a slow call
+off but cannot stop it: the call runs on and the processor acts on it, and a synthetic slow call
+approves up to `slow-millis` (3 s) after it started. An answer's commit can also lose to a
+concurrent write on the payment's version (a void, another attempt's approval, a release being
+recorded), roll back with the transaction around it, as a re-drive's does inside the idempotent
+consumer, or die with a killed process. Every approval is a new authorization with a code of its
+own, so a timed out attempt and its retry that both approve are two holds on the card, and an
+approval whose commit was lost is a hold no payment knows it has.
 
-A payment keeps one authorization while it is authorized and none otherwise, and the processor is
-asked to release everything else it holds under the order's reference (`release(order, keep)`).
-The release goes by the reference because the payment service does not hold the code of every
-authorization the processor granted: one whose answer died with a killed payment service is known
-only to the processor. A release is made due (`releaseDueAt`) whenever the processor may hold
-something the payment does not keep: when the payment is authorized (any other approval for the
-order), when it is voided, when a cancellation is sent again for it, when an approval arrives that
-it does not keep (after its void or decline, or besides the authorization it has), and, after a
-restart, for every payment settled within `ledgermesh.payment.recheck-window` (10 min), which
-covers answers that were in flight when the process was killed. The sweeper asks for due releases,
-the longest due first, behind the processor's breaker and the longer time limit, off the listener
-threads; a release is recorded only on the version of the payment row it read, so an approval that
-lands while it is on its way leaves the next one due, and a refused release waits longer each time
-without holding up the others. An outcome that read the row before the void committed fails on the
-version instead and rolls back; the release the void made due covers what the processor granted.
+So the rule that the card holds only what the payment keeps is enforced from the processor's side.
+`HoldReconciler` runs every `ledgermesh.payment.reconcile-ms` (5 s), lists the merchant's
+outstanding authorizations, and releases every one older than the grace period that its payment does
+not keep. A payment keeps exactly one code, the one it is authorized under, and nothing while it is
+voided, declined, open or absent: an open payment has not committed that approval and will be
+attempted again under a new code. The grace period is the longest a processor call can run, the
+longest of the processor's own bound and the configured time limits (5 s here), plus
+`ledgermesh.payment.reconcile.commit-allowance` (5 s) for the answer to be committed; an
+authorization younger than that may be on its way to becoming the kept one and is left alone, and
+the kept code is never released. The guarantee is therefore: no authorization survives more than the
+grace period plus one reconciliation interval (15 s by default) unless its payment keeps it,
+whatever became of the answer that granted it. A real processor has to offer what the reconciler
+uses, a listing of the merchant's outstanding authorizations with their reference and grant time and
+a release by code, which card processors provide for reconciliation.
+`ledgermesh.payments.reconciled.released` counts what it released and
+`ledgermesh.payments.unkept.oldest.seconds` is the age of the oldest outstanding authorization no
+payment keeps.
+
+The quicker path stays for the cases the payment service sees, all on settled payments, where
+releasing at once cannot touch an approval about to be kept. An answer that came after its time
+limit is published as a `LateOutcome` and committed like any other, with a few tries on a version
+conflict. A release is made due (`releaseDueAt`) when a payment is authorized (any other approval
+for the order), voided, sent a cancellation again, or answered with an approval it does not keep,
+and the sweeper asks the processor, behind its breaker and the longer time limit, to release
+everything under the order's reference but the kept code, recording it only on the version of the
+row it read and backing off after a refusal. Nothing is released this way for an open payment; its
+stale approvals are the reconciler's.
 
 The synthetic processor is deterministic in its outcomes: which attempts approve, fail or hang
 depends only on the order id and the attempt number, so a run is reproducible and the retry and
@@ -296,10 +306,10 @@ approval as an outstanding authorization in its own `processor_hold` table, one 
 authorization, written in transactions of its own so that neither a rolled back payment transaction
 nor a killed payment service loses what it granted, and releases them by order reference but the
 kept one, idempotently. It and its table exist only while `ledgermesh.processor.synthetic` is on,
-which is where a real processor's client would take its place. The chaos harness reads that table
-at the end of a run, after waiting out the longest call that can still be running (`slow-millis`
-plus a margin and a sweep): a confirmed order must have exactly its one authorization outstanding,
-and no other order any, whatever state it is in.
+which is where a real processor's client would take its place. The chaos harness reads that table at
+the end of a run, after waiting the grace period plus one reconciliation interval: a confirmed order
+must have exactly its one authorization outstanding, and no other order any, whatever state it is
+in.
 
 ## Read-your-writes stock check
 

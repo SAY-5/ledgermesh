@@ -46,12 +46,14 @@ import org.springframework.transaction.support.TransactionTemplate;
  * every cancellation with {@code payment.voided}, which is how the order service knows the payment
  * side of the compensation is done.
  *
- * <p>Every answer the processor gives reaches {@link #commit}, the ones that came after their time
- * limit included ({@link LateOutcome}). A payment keeps one authorization while it is authorized
- * and none otherwise, and anything else the processor may hold for the order makes a release due:
- * an authorization (any other approval for the order), a void, a cancellation sent again, and every
- * approval the payment does not keep. {@link #sweepReleases} asks the processor, behind its breaker
- * and time limit, to release all but the kept one, until it confirms, backing off after refusals.
+ * <p>A payment keeps one authorization while it is authorized and none otherwise. What guarantees
+ * the card holds nothing else is {@link HoldReconciler}: no authorization survives more than its
+ * grace period plus one interval unless its payment keeps it, whether or not the answer that
+ * granted it was ever committed here. This class shortens that for the answers it does commit, the
+ * ones that came after their time limit included ({@link LateOutcome}): an authorization (any other
+ * approval for the order), a void, a cancellation sent again and an approval the payment does not
+ * keep make a release due on a settled payment, and {@link #sweepReleases} asks the processor,
+ * behind its breaker and time limit, to release all but the kept one, backing off after refusals.
  */
 @Service
 public class PaymentService {

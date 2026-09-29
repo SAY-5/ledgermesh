@@ -19,20 +19,22 @@ see the versioning note in [CONTRIBUTING.md](CONTRIBUTING.md).
   `PAYMENT_TIMEOUT` takes at least 120 s. The payment service now reads `order.cancelled` and voids
   an authorized or open payment, or inserts a voided marker when the cancellation comes first, so a
   late reservation or re-drive charges nothing.
-* A void was only a status on the payment row: the processor kept the authorization, and an
-  approval that landed after the void (an attempt that had read the payment open, a reservation that
-  reached the payment service after the cancellation, or a call the time limiter had cut off, which
-  runs on and approves up to `slow-millis` later) was dropped from the ledger but left on the card.
-  Every processor answer now reaches the payment, one that came after its time limit included, and
-  every approval is an authorization with a code of its own. A payment keeps one authorization while
-  it is authorized and none otherwise, and the processor releases, by order reference and
-  idempotently, everything else it holds for the order. A release is due after an authorization, a
-  void, a cancellation sent again, any approval the payment does not keep, and, after a restart, for
-  every payment settled in the last ten minutes; the sweeper asks for it behind the processor's
-  breaker and time limit, records it only on the version of the payment it read, and backs off
-  after a refusal. The synthetic processor keeps what it granted in a `processor_hold` table of its
-  own, one row per authorization, committed apart from the payment service's transactions, and it
-  and its table exist only while `ledgermesh.processor.synthetic` is on.
+* A void was only a status on the payment row: the processor kept the authorization, and an approval
+  that landed after the void (an attempt that had read the payment open, a reservation that reached
+  the payment service after the cancellation, or a call the time limiter had cut off, which runs on
+  and approves up to `slow-millis` later) was dropped from the ledger but left on the card; so was
+  an approval whose commit lost a race, rolled back or died with the process. Every approval is now
+  an authorization with a code of its own, a payment keeps one while it is authorized and none
+  otherwise, and a reconciler in the payment service lists the processor's outstanding
+  authorizations every 5 s and releases every one its payment does not keep once it is older than
+  the grace period, the longest processor call plus a commit allowance (10 s by default). No
+  authorization survives more than the grace period plus one interval unless its payment keeps it.
+  Voids, authorizations, approvals a payment does not keep and cancellations sent again also have
+  the sweeper ask the processor at once, behind its breaker and time limit, to release all but the
+  kept code, for settled payments only. The synthetic processor keeps what it granted in a
+  `processor_hold` table of its own, one row per authorization, committed apart from the payment
+  service's transactions, and it and its table exist only while `ledgermesh.processor.synthetic` is
+  on.
 * A cancellation the payment service could not apply before its retries ran out went to
   `order.cancelled.dlq`, where only an operator's replay could bring it back, and the charge stayed.
   The payment service now answers every cancellation with `payment.voided`, the order service
@@ -49,15 +51,16 @@ see the versioning note in [CONTRIBUTING.md](CONTRIBUTING.md).
   orders whose cancellation was never answered and that are not waiting for an answer, oldest
   first, and each one sent waits for its answer from then on like a new cancellation, so the next
   call takes the next ones. Inventory treats the copies as the no-op releases they are.
-* The chaos harness waits out the longest processor call that can still be running, then reads every
-  order, its timeline, its payment, its stock holds and the synthetic processor's authorizations
-  from the three databases into `chaos/out/final.json`, and fails a run whose ledger breaks a money
-  or stock rule: a confirmed order paid once, holding its stock and its one authorization, any other
-  order holding no authorization, a cancelled one charged nothing, holding nothing and its
-  cancellation answered. A cancellation for a saga deadline is counted under `cancelled (deadline)`
-  with its reason instead of under `failed / stuck`, and every order that was not confirmed or
-  cancelled for stock is listed with its payment, card, holds and timeline. The GitHub chaos job
-  takes a `chaos_seeds` input when started by hand and runs one job per seed listed.
+* The chaos harness waits the payment service's reconciliation grace period plus one interval, then
+  reads every order, its timeline, its payment, its stock holds and the synthetic processor's
+  authorizations from the three databases into `chaos/out/final.json`, and fails a run whose ledger
+  breaks a money or stock rule: a confirmed order paid once, holding its stock and its one
+  authorization, any other order holding no authorization, a cancelled one charged nothing, holding
+  nothing and its cancellation answered. A cancellation for a saga deadline is counted under
+  `cancelled (deadline)` with its reason instead of under `failed / stuck`, and every order that was
+  not confirmed or cancelled for stock is listed with its payment, card, holds and timeline. The
+  GitHub chaos job takes a `chaos_seeds` input when started by hand and runs one job per seed
+  listed.
 * Two calls racing on one `Idempotency-Key` could both place an order. The answer was saved with a
   merge, which reads the row first: a call that stored its answer after the other had committed
   found that row and overwrote it instead of failing on the primary key, and both orders were

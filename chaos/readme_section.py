@@ -331,9 +331,9 @@ the first kill; on the restart the reaper cancels it before the listener reads t
 the payment waiting for it. Such an order is compensated like any cancellation, its stock
 released, its payment voided and its authorization released at the processor, and a summary the
 harness writes now counts it under `cancelled (deadline)` with its reason instead of under
-`failed / stuck`. Before teardown the harness waits out the longest processor call that can still
-be running (the synthetic processor's `slow-millis` plus a margin and a sweep, or
-`CHAOS_INFLIGHT_WAIT`), since a call cut off by its time limit can still approve, then reads every
+`failed / stuck`. Before teardown the harness waits the payment service's reconciliation grace
+period plus one interval (read from its gauges, 17 s with the defaults, or `CHAOS_INFLIGHT_WAIT`),
+so that any authorization no payment keeps has been released by the reconciler, then reads every
 order, its timeline, its payment, its stock holds and the synthetic processor's authorizations
 from the three databases into `chaos/out/final.json`, waiting up to `CHAOS_DRAIN_TIMEOUT` for
 compensations still on their way;

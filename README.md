@@ -157,10 +157,10 @@ first kill; on the restart the reaper cancels it before the listener reads the r
 payment waiting for it. Such an order is compensated like any cancellation, its stock released, its
 payment voided and its authorization released at the processor, and a summary the harness writes now
 counts it under `cancelled (deadline)` with its reason instead of under `failed / stuck`. Before
-teardown the harness waits out the longest processor call that can still be running (the synthetic
-processor's `slow-millis` plus a margin and a sweep, or `CHAOS_INFLIGHT_WAIT`), since a call cut off
-by its time limit can still approve, then reads every order, its timeline, its payment, its stock
-holds and the synthetic processor's authorizations from the three databases into
+teardown the harness waits the payment service's reconciliation grace period plus one interval (read
+from its gauges, 17 s with the defaults, or `CHAOS_INFLIGHT_WAIT`), so that any authorization no
+payment keeps has been released by the reconciler, then reads every order, its timeline, its
+payment, its stock holds and the synthetic processor's authorizations from the three databases into
 `chaos/out/final.json`, waiting up to `CHAOS_DRAIN_TIMEOUT` for compensations still on their way;
 the `ledger` line fails the run on any money or stock rule broken, and `orders to read` lists every
 order that was not confirmed or cancelled for stock with its payment, what the card holds, its stock
@@ -225,7 +225,7 @@ final ledger, summary); the harness tears the stack down on every exit path unle
 
 ```bash
 make lint     # spotless (google-java-format)
-make test     # mvn verify: 122 unit tests + 18 integration tests
+make test     # mvn verify: 131 unit tests + 18 integration tests
 ```
 
 Unit tests (H2, no Docker): saga state machine transitions and compensation, deadline reaper (silent
@@ -244,16 +244,18 @@ before the void failing on its version, an attempt that called the processor aft
 its approval dropped and released), the synthetic processor's authorizations (one hold per approval,
 released but the one kept, kept apart from the payment service's transactions, and absent when it is
 off), an approval that arrives after its time limit through the real decorator being released, a
-late approval that cannot be committed still making a release due, a refused release backing off
-without holding up the others, a restart asking the processor again about recent payments, the order
-service sending an unanswered cancellation again until `payment.voided` arrives, and the upgrade
-repair that sends every unanswered cancellation again, deterministic processor, the replay cap that
-turns a record into a parked poison message, the replayer committing only the offsets it handled and
-waiting for its group assignment before it treats silence as an empty topic, the request
-deduplication store, the relay counting a send that never confirmed, the open and overdue saga
-counts behind the ops overview, saga metrics and log lines that wait for the commit, and the
-reservation ledger (a release credits what the order held, a release before the reservation is a
-no-op that blocks the late reservation, a repeated reservation takes stock once).
+refused release backing off without holding up the others, the reconciler releasing every
+authorization past its grace period that the payment does not keep (voided, declined, absent, a
+surplus beside the kept code, an open payment's stale approval) and leaving a younger one and the
+kept code alone, the verifier's four races in which an answer's commit is lost, the order service
+sending an unanswered cancellation again until `payment.voided` arrives, and the upgrade repair that
+sends every unanswered cancellation again, deterministic processor, the replay cap that turns a
+record into a parked poison message, the replayer committing only the offsets it handled and waiting
+for its group assignment before it treats silence as an empty topic, the request deduplication
+store, the relay counting a send that never confirmed, the open and overdue saga counts behind the
+ops overview, saga metrics and log lines that wait for the commit, and the reservation ledger (a
+release credits what the order held, a release before the reservation is a no-op that blocks the
+late reservation, a repeated reservation takes stock once).
 
 Integration tests (`e2e-tests`, Testcontainers Redpanda + Postgres + Redis, all three services
 booted in one JVM): an order flows to CONFIRMED end to end, out of stock and declined payment paths
@@ -387,12 +389,13 @@ state machine and outbox as any inbound event:
 The payment service authorizes off `inventory.reserved` whatever the order has become since, so it
 reads `order.cancelled` too: an authorized or open payment is voided, and a cancellation that
 arrives before any payment leaves a voided marker, so the late reservation or re-drive never calls
-the processor. The processor is then asked to release every authorization it holds for the order,
-from the sweeper, behind its breaker and time limit, until it confirms. Every processor answer
-reaches the payment, one that came after its time limit included, every approval is an authorization
-of its own, and an approval the payment does not keep (after the void, or a second one besides the
-authorization it keeps) makes a release due again; a cancellation sent again, and a restart of the
-payment service, have the processor checked once more. Every cancellation is answered with
+the processor. A payment keeps one authorization while it is authorized and none otherwise, and a
+reconciler in the payment service releases every outstanding authorization older than a grace period
+(the longest processor call plus a commit allowance, 10 s by default) that its payment does not
+keep, every 5 s, so no authorization survives more than the grace period plus one interval unless
+its payment keeps it, including one whose answer's commit was lost. Voids, authorizations and
+approvals the payment does not keep also make a release due at once, which the sweeper asks the
+processor for behind its breaker and time limit. Every cancellation is answered with
 `payment.voided`, and until that answer arrives the reaper sends `order.cancelled` again every
 `ledgermesh.saga.compensation` (default 60 s), so a cancellation the payment service dead lettered
 is voided on the next copy without anyone replaying it. A deadline runs on the wall clock, including
