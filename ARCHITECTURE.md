@@ -33,7 +33,8 @@ change the outcome of any order. This document explains the mechanisms that make
 | `inventory.rejected` | inventory | order | out of stock or unknown sku; order is CANCELLED |
 | `payment.completed` | payment | order | order is CONFIRMED |
 | `payment.failed` | payment | order | order is CANCELLED and compensation is emitted |
-| `order.cancelled` | order | inventory, payment | release the reservation; void the payment, or block it if not made yet |
+| `order.cancelled` | order | inventory, payment | release the reservation; void the payment, or block it if not made yet, and release what the processor holds |
+| `payment.voided` | payment | order | the payment side of a cancellation is done; the order service stops sending `order.cancelled` |
 | `order.payment_requested` | order | payment | the payment deadline passed; answer with the outcome on file or attempt now |
 
 Every topic has three partitions and every message is keyed by order id, so all events for one
@@ -166,6 +167,19 @@ payment outcome that arrives after that is recorded in the timeline as ignored, 
 rule of the state machine still holds; the payment itself is voided by the payment service when
 `order.cancelled` reaches it, so the customer is not charged for the cancelled order.
 
+A cancellation that emits `order.cancelled` also sets `compensationDueAt` on the order and waits
+for the payment service to answer with `payment.voided`. The reaper sends `order.cancelled` again,
+under a fresh event id, for every cancellation still unanswered at its due time, and waits again
+(`ledgermesh.saga.compensation`, 60 s by default; `ledgermesh.saga.compensations.overdue` counts
+the ones past due). This matters because the payment service's handler can fail like any other: a
+cancellation it cannot apply before its retries run out goes to `order.cancelled.dlq`, and replay
+from there is an operator's decision that may never come. With the resend, the dead letter is only
+a delay: the next copy is voided like the first would have been, since the payment service
+applies every copy the same way and answers every one. `POST /admin/compensations/resend` sends the
+cancellation of every cancelled order that was never answered, including orders cancelled before
+the order service waited for answers, which are not waiting for one; after that they wait like
+any other.
+
 A deadline runs on the wall clock, and the order service's own absences count against it. An
 order placed just before the order service went away, whose reservation window its absences used
 up, is cancelled by the reaper's first tick after a restart, before the answers to it have been
@@ -176,6 +190,13 @@ second after the cancellation, and three still had their `order.created` in the 
 outbox, so inventory reserved and payment authorized them just after they were cancelled. Either
 way the cancellation is compensated in full, stock released and payment voided, and the chaos
 summary reports it under `cancelled (deadline)` rather than as a failure.
+
+Holding the reaper back after a restart would spare some of these cancellations, but partition
+assignment is not the signal for it: the answers can still be unread with partitions assigned, and
+three of the six above had not even been sent, since their `order.created` was still in the order
+service's own outbox. The reaper would have to wait for the saga listener's lag to reach zero and
+for the order service's outbox backlog to drain. It does not; the cancellation is compensated
+instead.
 
 Every step, including ignored and late events, is appended to `order_event` in the same
 transaction as the change it describes and served by `GET /orders/{id}/timeline`. Because the row
@@ -227,19 +248,40 @@ before it calls the processor. Its transaction rolls back, and the error handler
 record again; this time it finds the payment on file, so the reservation leaves a settled payment
 alone and the re-drive attempts an open one or re-emits a settled one's outcome.
 
-A cancelled order's payment has to come back. The payment service authorizes off
-`inventory.reserved` whatever the order has become since, so it also consumes `order.cancelled`:
-an authorized payment is voided (its authorization code kept as the record), an open one is voided
-before the sweeper or a re-drive can attempt it, and a declined one is left alone. A cancellation
-that finds no payment on file, because the reservation has not reached the payment service yet,
-inserts a voided marker for nothing, the way inventory leaves a released marker, so the late
-reservation and any re-drive find the order given up and charge nothing. The marker is inserted
-like a payment, so a race with either creator ends on the primary key and a redelivery onto the
-winner's row. An authorization already in flight when the void commits finds the payment settled
-when it tries to commit its outcome, and is dropped with no `payment.completed`.
+A cancelled order's payment has to come back, from the payment service's rows and from the card.
+The payment service authorizes off `inventory.reserved` whatever the order has become since, so it
+also consumes `order.cancelled`. An authorized payment is voided (its authorization code kept as
+the record) and an open one is voided before the sweeper or a re-drive can attempt it; either way
+the void makes a release at the processor due (`releaseDueAt`), because an authorized payment holds
+money on the card and an open one may have been approved by an attempt whose answer never made it
+back. A declined payment is left alone. A cancellation that finds no payment on file, because the
+reservation has not reached the payment service yet, inserts a voided marker for nothing, the way
+inventory leaves a released marker, so the late reservation and any re-drive find the order given
+up and never call the processor; nothing was asked of the processor for it, so no release is due.
+The marker is inserted like a payment, so a race with either creator ends on the primary key and a
+redelivery onto the winner's row. Whatever it found, the cancellation is answered with
+`payment.voided` in the same transaction.
+
+After the void commits, the listener asks the processor to release every authorization it holds
+under the order's reference. The release goes by the reference, not by one authorization code,
+because the payment service does not always know the code of what the processor granted: an
+approval cut off by the time limiter, or one that landed while the payment service was being killed
+before it committed it, is a live authorization all the same. It runs outside any transaction and
+is recorded only on the version of the payment row it read, so a processor that cannot be reached,
+or an approval that lands while the release is on its way, leaves the release due, and the sweeper
+asks again until the processor confirms. An authorization in flight when the void commits finds the
+payment voided when it commits its outcome: nothing is recorded as paid and no `payment.completed`
+is sent, the release is made due again, and the attempt asks for it at once. If that outcome read
+the row before the void committed, its write fails on the version instead and rolls back; the void's
+own release, which runs after the processor answered, takes the hold back.
 
 The synthetic processor is deterministic: outcomes depend only on the order id and the attempt
-number, so a run is reproducible and the retry and breaker paths are exercised on every run.
+number, so a run is reproducible and the retry and breaker paths are exercised on every run. It
+keeps every approval as an outstanding authorization in its own `processor_hold` table, written in
+transactions of its own so that neither a rolled back payment transaction nor a killed payment
+service loses what it granted, and releases them by order reference, idempotently. The chaos
+harness reads that table at the end of a run: a confirmed order must have exactly its one
+authorization outstanding, and no other order any.
 
 ## Read-your-writes stock check
 
@@ -271,10 +313,11 @@ the chaos run reports `failed / stuck 0` while one service is down.
 Killing the order service is different in one way: the saga deadlines run on its clock, and they
 keep running while it is away. An order whose reservation window is used up by the order service's
 own absences is cancelled for `RESERVATION_TIMEOUT` when it comes back, and compensated: the
-release returns its stock and the void returns its payment. That is an outcome, not a failure, and
-the chaos harness checks it as one, from the ledger it reads out of the three databases at the end
-of a run: every order confirmed and paid once with its stock held, or cancelled with nothing
-charged and nothing held.
+release returns its stock, the void returns its payment and the processor releases the
+authorization. That is an outcome, not a failure, and the chaos harness checks it as one, from the
+ledger it reads out of the three databases at the end of a run: every order confirmed and paid once
+with its stock held and its authorization outstanding, or cancelled with nothing charged, nothing
+held, nothing left on the card and its cancellation answered.
 
 ## Observability
 
@@ -304,6 +347,8 @@ meters:
 | `ledgermesh.breaker.transitions{name,from,to}` | all | breaker history |
 | `ledgermesh.payments.by_state`, `.deferred`, `.outcomes` | payment | deferred queue |
 | `ledgermesh.payments.voided{was}` | payment | payments voided for cancelled orders, by the state they were in (`NONE` for a marker) |
+| `ledgermesh.payments.releases{result}`, `.releases.due`, `.approvals_after_void` | payment | releases at the processor: released, nothing to release, failed or superseded; releases not yet confirmed; approvals that landed after a void |
+| `ledgermesh.saga.cancellations.resent`, `ledgermesh.saga.compensations.overdue` | order | cancellations sent again for want of `payment.voided`; cancellations past their wait for it |
 | `ledgermesh.cache.reads{result}` | inventory | cache hit ratio |
 | `ledgermesh.inventory.reservations{result}` | inventory | reservations reserved or rejected |
 | `ledgermesh.inventory.releases{result}` | inventory | compensations that released units, or found nothing to release |
