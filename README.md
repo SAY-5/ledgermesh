@@ -5,9 +5,10 @@ messaging (Redpanda), Redis caching, Resilience4j circuit breakers, time limiter
 a GitLab CI pipeline, and a chaos test that kills one service under load and proves that zero
 orders failed.
 
-`make chaos` starts the stack, submits orders at 20/s for 60 s, kills the inventory or payment
-service three times at random moments (restarting each after 5 s), waits for the saga backlog to
-drain and asserts every order reached CONFIRMED or a legitimate out of stock CANCELLED.
+`make chaos` starts the stack, submits orders at 20/s for 60 s, kills the inventory, payment or
+order service three times, with moments and victims drawn from `CHAOS_SEED` (restarting each after
+5 s), waits for the saga backlog to drain and asserts every order reached CONFIRMED or a legitimate
+out of stock CANCELLED.
 
 ## Architecture
 
