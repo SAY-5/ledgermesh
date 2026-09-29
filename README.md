@@ -225,7 +225,7 @@ final ledger, summary); the harness tears the stack down on every exit path unle
 
 ```bash
 make lint     # spotless (google-java-format)
-make test     # mvn verify: 111 unit tests + 18 integration tests
+make test     # mvn verify: 122 unit tests + 18 integration tests
 ```
 
 Unit tests (H2, no Docker): saga state machine transitions and compensation, deadline reaper (silent
@@ -241,7 +241,11 @@ processor confirms, and due again when an approval lands during a release), the 
 void and a payment (a cancellation losing the insert to a reservation and voiding on redelivery, a
 reservation losing to the marker and never calling the processor, an outcome that read the row
 before the void failing on its version, an attempt that called the processor after the void having
-its approval dropped and released), the synthetic processor's outstanding authorizations, the order
+its approval dropped and released), the synthetic processor's authorizations (one hold per approval,
+released but the one kept, kept apart from the payment service's transactions, and absent when it is
+off), an approval that arrives after its time limit through the real decorator being released, a
+late approval that cannot be committed still making a release due, a refused release backing off
+without holding up the others, a restart asking the processor again about recent payments, the order
 service sending an unanswered cancellation again until `payment.voided` arrives, and the upgrade
 repair that sends every unanswered cancellation again, deterministic processor, the replay cap that
 turns a record into a parked poison message, the replayer committing only the offsets it handled and
