@@ -66,6 +66,7 @@ def scrape(service):
                     "ledgermesh_payments_deferred_total", "ledgermesh_payments_voided_total",
                     "ledgermesh_payments_surplus_approvals_total",
                     "ledgermesh_payments_late_outcomes_total",
+                    "ledgermesh_payments_reconciled_released_total",
                     "ledgermesh_payments_releases_total",
                     "ledgermesh_saga_cancellations_resent_total",
                     "ledgermesh_consumer_duplicates_total",
@@ -505,7 +506,8 @@ def summary(orders_path, snapshots_path, kills_path, final_path=None):
     transitions = []
     retries = {"successful_with_retry": 0, "failed_with_retry": 0, "successful_without_retry": 0,
                "failed_without_retry": 0}
-    deferred = voided = surplus = late = resent = duplicates = releases = release_noops = 0
+    deferred = voided = surplus = late = reconciled = resent = duplicates = releases = 0
+    release_noops = 0
     replayed = 0
     card_releases = {}
     for service, counters in totals.items():
@@ -525,6 +527,8 @@ def summary(orders_path, snapshots_path, kills_path, final_path=None):
                 surplus += int(value)
             elif name == "ledgermesh_payments_late_outcomes_total":
                 late += int(value)
+            elif name == "ledgermesh_payments_reconciled_released_total":
+                reconciled += int(value)
             elif name == "ledgermesh_payments_releases_total":
                 result = label(labels, "result")
                 card_releases[result] = card_releases.get(result, 0) + int(value)
@@ -577,7 +581,8 @@ def summary(orders_path, snapshots_path, kills_path, final_path=None):
         "  processor releases   " + (", ".join(f"{n} {result}" for result, n in
                                               sorted(card_releases.items()))
                                      if card_releases else "none")
-        + f"; {late} answers after their time limit, {surplus} approvals not kept",
+        + f"; {late} answers after their time limit, {surplus} approvals not kept; "
+        f"{reconciled} released by the reconciler",
         f"  resubmits            {run.get('resubmits', 0)} retried submits over "
         f"{run.get('retriedOrders', 0)} orders, {run.get('replayedAnswers', 0)} answered from the "
         f"idempotency store ({replayed} replays counted by the service), "
