@@ -262,26 +262,42 @@ The marker is inserted like a payment, so a race with either creator ends on the
 redelivery onto the winner's row. Whatever it found, the cancellation is answered with
 `payment.voided` in the same transaction.
 
-After the void commits, the listener asks the processor to release every authorization it holds
-under the order's reference. The release goes by the reference, not by one authorization code,
-because the payment service does not always know the code of what the processor granted: an
-approval cut off by the time limiter, or one that landed while the payment service was being killed
-before it committed it, is a live authorization all the same. It runs outside any transaction and
-is recorded only on the version of the payment row it read, so a processor that cannot be reached,
-or an approval that lands while the release is on its way, leaves the release due, and the sweeper
-asks again until the processor confirms. An authorization in flight when the void commits finds the
-payment voided when it commits its outcome: nothing is recorded as paid and no `payment.completed`
-is sent, the release is made due again, and the attempt asks for it at once. If that outcome read
-the row before the void committed, its write fails on the version instead and rolls back; the void's
-own release, which runs after the processor answered, takes the hold back.
+Every answer the processor gives reaches the payment, including the ones nobody was waiting for.
+The time limiter cuts a slow call off but cannot stop it: the call runs on and the processor acts
+on it, and a synthetic slow call approves up to `slow-millis` (3 s) after it started. The decorated
+call therefore completes its own future with the answer, and when the time limiter completed that
+future first, publishes the answer as a `LateOutcome`, which is committed like any other and
+retried if a concurrent write to the payment won the version. Every approval is a new authorization
+with a code of its own, so a timed out attempt and its retry that both approve are two holds on the
+card.
 
-The synthetic processor is deterministic: outcomes depend only on the order id and the attempt
-number, so a run is reproducible and the retry and breaker paths are exercised on every run. It
-keeps every approval as an outstanding authorization in its own `processor_hold` table, written in
-transactions of its own so that neither a rolled back payment transaction nor a killed payment
-service loses what it granted, and releases them by order reference, idempotently. The chaos
-harness reads that table at the end of a run: a confirmed order must have exactly its one
-authorization outstanding, and no other order any.
+A payment keeps one authorization while it is authorized and none otherwise, and the processor is
+asked to release everything else it holds under the order's reference (`release(order, keep)`).
+The release goes by the reference because the payment service does not hold the code of every
+authorization the processor granted: one whose answer died with a killed payment service is known
+only to the processor. A release is made due (`releaseDueAt`) whenever the processor may hold
+something the payment does not keep: when the payment is authorized (any other approval for the
+order), when it is voided, when a cancellation is sent again for it, when an approval arrives that
+it does not keep (after its void or decline, or besides the authorization it has), and, after a
+restart, for every payment settled within `ledgermesh.payment.recheck-window` (10 min), which
+covers answers that were in flight when the process was killed. The sweeper asks for due releases,
+the longest due first, behind the processor's breaker and the longer time limit, off the listener
+threads; a release is recorded only on the version of the payment row it read, so an approval that
+lands while it is on its way leaves the next one due, and a refused release waits longer each time
+without holding up the others. An outcome that read the row before the void committed fails on the
+version instead and rolls back; the release the void made due covers what the processor granted.
+
+The synthetic processor is deterministic in its outcomes: which attempts approve, fail or hang
+depends only on the order id and the attempt number, so a run is reproducible and the retry and
+breaker paths are exercised on every run; the authorization codes are random. It keeps every
+approval as an outstanding authorization in its own `processor_hold` table, one row per
+authorization, written in transactions of its own so that neither a rolled back payment transaction
+nor a killed payment service loses what it granted, and releases them by order reference but the
+kept one, idempotently. It and its table exist only while `ledgermesh.processor.synthetic` is on,
+which is where a real processor's client would take its place. The chaos harness reads that table
+at the end of a run, after waiting out the longest call that can still be running (`slow-millis`
+plus a margin and a sweep): a confirmed order must have exactly its one authorization outstanding,
+and no other order any, whatever state it is in.
 
 ## Read-your-writes stock check
 
@@ -347,7 +363,8 @@ meters:
 | `ledgermesh.breaker.transitions{name,from,to}` | all | breaker history |
 | `ledgermesh.payments.by_state`, `.deferred`, `.outcomes` | payment | deferred queue |
 | `ledgermesh.payments.voided{was}` | payment | payments voided for cancelled orders, by the state they were in (`NONE` for a marker) |
-| `ledgermesh.payments.releases{result}`, `.releases.due`, `.approvals_after_void` | payment | releases at the processor: released, nothing to release, failed or superseded; releases not yet confirmed; approvals that landed after a void |
+| `ledgermesh.payments.releases{result}`, `.releases.due` | payment | releases at the processor: released, nothing to release, failed or superseded; releases not yet confirmed |
+| `ledgermesh.payments.late_outcomes`, `.surplus_approvals{payment}` | payment | processor answers that came after their time limit; approvals a payment does not keep, by the payment's state |
 | `ledgermesh.saga.cancellations.resent`, `ledgermesh.saga.compensations.overdue` | order | cancellations sent again for want of `payment.voided`; cancellations past their wait for it |
 | `ledgermesh.cache.reads{result}` | inventory | cache hit ratio |
 | `ledgermesh.inventory.reservations{result}` | inventory | reservations reserved or rejected |
