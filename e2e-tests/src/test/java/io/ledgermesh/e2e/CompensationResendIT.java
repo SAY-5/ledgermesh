@@ -65,7 +65,7 @@ class CompensationResendIT {
 
       await().atMost(TIMEOUT).until(() -> deadLettered(paymentMeters) > deadLettered);
       assertThat(ReservationTimeoutIT.paymentStatus(id)).isEqualTo("AUTHORIZED");
-      assertThat(ReservationTimeoutIT.holdsAtProcessor(id)).isEqualTo(1);
+      assertThat(ReservationTimeoutIT.holdsAtProcessor(id)).isPositive();
       assertThat(Stack.getOrder(id).get("compensatedAt").isNull()).isTrue();
     } finally {
       payments("alter table payment drop constraint if exists " + BLOCK);

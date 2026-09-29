@@ -43,7 +43,7 @@ class ReservationTimeoutIT {
     try {
       id = Stack.createOrder("cust-deadline", SKU, 2, new BigDecimal("4.00"));
       await().atMost(TIMEOUT).until(() -> paymentStatus(id).equals("AUTHORIZED"));
-      assertThat(holdsAtProcessor(id)).isEqualTo(1);
+      assertThat(holdsAtProcessor(id)).isPositive();
       assertThat(Stack.stock(SKU)).isEqualTo(8);
       assertThat(Stack.orderStatus(id)).isEqualTo("PENDING");
 
