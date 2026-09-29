@@ -7,6 +7,7 @@ import io.ledgermesh.common.events.PaymentFailed;
 import io.ledgermesh.common.events.PaymentRequested;
 import io.ledgermesh.common.events.PaymentVoided;
 import io.ledgermesh.common.outbox.OutboxWriter;
+import io.ledgermesh.payment.domain.AuthorizationDecision;
 import io.ledgermesh.payment.domain.Payment;
 import io.ledgermesh.payment.domain.PaymentRepository;
 import io.ledgermesh.payment.domain.PaymentStatus;
@@ -47,13 +48,14 @@ import org.springframework.transaction.support.TransactionTemplate;
  * side of the compensation is done.
  *
  * <p>A payment keeps one authorization while it is authorized and none otherwise. What guarantees
- * the card holds nothing else is {@link HoldReconciler}: no authorization survives more than its
- * grace period plus one interval unless its payment keeps it, whether or not the answer that
- * granted it was ever committed here. This class shortens that for the answers it does commit, the
- * ones that came after their time limit included ({@link LateOutcome}): an authorization (any other
- * approval for the order), a void, a cancellation sent again and an approval the payment does not
- * keep make a release due on a settled payment, and {@link #sweepReleases} asks the processor,
- * behind its breaker and time limit, to release all but the kept one, backing off after refusals.
+ * the card eventually holds nothing else is {@link HoldReconciler}: unkept authorizations are
+ * durably retired before release, whether or not their answers were committed here. Cleanup
+ * requires available database/provider and successful scheduled passes. This class shortens it for
+ * the answers it does commit, the ones that came after their time limit included ({@link
+ * LateOutcome}): an authorization (any other approval for the order), a void, a cancellation sent
+ * again and an approval the payment does not keep make a release due on a settled payment, and
+ * {@link #sweepReleases} asks the processor, behind its breaker and time limit, to release all but
+ * the kept one, backing off after refusals.
  */
 @Service
 public class PaymentService {
@@ -66,6 +68,7 @@ public class PaymentService {
   private final PaymentAuthorizer authorizer;
   private final OutboxWriter outbox;
   private final TransactionTemplate tx;
+  private final AuthorizationDecisions decisions;
   private final Clock clock;
   private final MeterRegistry meters;
   private final Duration graceBeforeSweep;
@@ -76,6 +79,7 @@ public class PaymentService {
       PaymentAuthorizer authorizer,
       OutboxWriter outbox,
       TransactionTemplate tx,
+      AuthorizationDecisions decisions,
       Clock clock,
       MeterRegistry meters,
       @Value("${ledgermesh.payment.sweep-grace:3s}") Duration graceBeforeSweep,
@@ -84,6 +88,7 @@ public class PaymentService {
     this.authorizer = authorizer;
     this.outbox = outbox;
     this.tx = tx;
+    this.decisions = decisions;
     this.clock = clock;
     this.meters = meters;
     this.graceBeforeSweep = graceBeforeSweep;
@@ -328,13 +333,25 @@ public class PaymentService {
     return Optional.of(commit(orderId, outcome));
   }
 
-  /** Persists the outcome and its event in one transaction. Safe to call from any thread. */
+  /**
+   * Persists the outcome and its event in one transaction. Call outside any existing transaction:
+   * approvals need a fresh persistence context and an outer retry boundary for first-insert races.
+   */
   public PaymentStatus commit(String orderId, AuthorizationOutcome outcome) {
-    return tx.execute(status -> applyOutcome(orderId, outcome));
+    if (outcome instanceof AuthorizationOutcome.Authorized approved) {
+      return decisions.execute(
+          approved.code(), orderId, decision -> applyOutcome(orderId, outcome, decision));
+    }
+    return tx.execute(status -> applyOutcome(orderId, outcome, null));
   }
 
-  private PaymentStatus applyOutcome(String orderId, AuthorizationOutcome outcome) {
+  private PaymentStatus applyOutcome(
+      String orderId, AuthorizationOutcome outcome, AuthorizationDecision decision) {
     Payment payment = payments.findById(orderId).orElseThrow();
+    if (decision != null && decision.isRetired()) {
+      meters.counter("ledgermesh.payments.retired_approvals").increment();
+      return payment.getStatus();
+    }
     if (!payment.getStatus().isOpen()) {
       if (outcome instanceof AuthorizationOutcome.Authorized a
           && !a.code().equals(payment.keptAuthorization())) {
@@ -355,6 +372,7 @@ public class PaymentService {
     payment.attempted();
     switch (outcome) {
       case AuthorizationOutcome.Authorized a -> {
+        decision.claim();
         payment.authorized(a.code(), clock.instant());
         outbox.append(
             new PaymentCompleted(

@@ -68,6 +68,7 @@ class VerifierProbeTest {
   @Autowired private PaymentAuthorizer authorizer;
   @Autowired private OutboxWriter outboxWriter;
   @Autowired private TransactionTemplate tx;
+  @Autowired private AuthorizationDecisions decisions;
   @Autowired private Clock clock;
   @Autowired private EventCodec codec;
   @Autowired private PaymentEventListener listener;
@@ -227,6 +228,7 @@ class VerifierProbeTest {
             authorizer,
             outboxWriter,
             tx,
+            decisions,
             clock,
             new SimpleMeterRegistry(),
             Duration.ZERO,
@@ -291,6 +293,7 @@ class VerifierProbeTest {
             authorizer,
             outboxWriter,
             tx,
+            decisions,
             clock,
             new SimpleMeterRegistry(),
             Duration.ZERO,

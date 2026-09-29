@@ -11,9 +11,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Stream;
 import org.slf4j.Logger;
@@ -32,13 +30,12 @@ import org.springframework.stereotype.Component;
  * again. A payment keeps only the code it is authorized under, which is never released.
  *
  * <p>The grace period is the longest a processor call can run, taken from the processor and the
- * configured time limits, plus {@code ledgermesh.payment.reconcile.commit-allowance} for the answer
- * to be committed. An authorization younger than that may be on its way to becoming the kept one
- * and is left alone; one older than that is past its commit, or never going to have one. So no
- * authorization a payment does not keep survives more than the grace period plus one interval
- * ({@code ledgermesh.payment.reconcile-ms}), whatever became of the answer that granted it. The
- * release path of voids and late approvals is quicker for the cases it sees; this is what holds
- * when an answer's commit is lost to a race, a rollback or a killed process.
+ * configured time limits, plus {@code ledgermesh.payment.reconcile.commit-allowance}. This is a
+ * courtesy window, not proof that an old answer can no longer commit. A durable decision-row lock
+ * serializes approval and retirement; an answer for a retired code cannot authorize a payment.
+ * Retirement commits before the external release, so release failure or process death can safely be
+ * retried next pass. Grace plus one interval is only an expected cleanup window when scheduling,
+ * database/provider availability and listing throughput permit it, not an unconditional bound.
  */
 @Component
 @ConditionalOnProperty(
@@ -51,6 +48,7 @@ public class HoldReconciler {
 
   private final PaymentProcessor processor;
   private final PaymentRepository payments;
+  private final AuthorizationDecisions decisions;
   private final Clock clock;
   private final Duration grace;
   private final Duration interval;
@@ -61,6 +59,7 @@ public class HoldReconciler {
   public HoldReconciler(
       PaymentProcessor processor,
       PaymentRepository payments,
+      AuthorizationDecisions decisions,
       TimeLimiterRegistry limiters,
       Clock clock,
       MeterRegistry meters,
@@ -69,6 +68,7 @@ public class HoldReconciler {
       @Value("${ledgermesh.payment.reconcile.page:1000}") int page) {
     this.processor = processor;
     this.payments = payments;
+    this.decisions = decisions;
     this.clock = clock;
     Duration call =
         Stream.of(
@@ -139,32 +139,42 @@ public class HoldReconciler {
 
   /** One page of the listing: releases what is past the cutoff and not kept. */
   private Pass reconcile(List<Authorization> outstanding, Instant cutoff) {
-    Map<String, Payment> byOrder = new HashMap<>();
-    for (Payment p :
-        payments.findAllById(
-            outstanding.stream().map(Authorization::orderId).distinct().toList())) {
-      byOrder.put(p.getOrderId(), p);
-    }
     int count = 0;
     Instant oldest = null;
     for (Authorization a : outstanding) {
-      Payment payment = byOrder.get(a.orderId());
-      if (keeps(payment, a.authorizationCode())) {
-        continue;
-      }
       if (a.grantedAt().isAfter(cutoff)) {
-        oldest = oldest == null || a.grantedAt().isBefore(oldest) ? a.grantedAt() : oldest;
+        // This read is only for an age metric; it must never authorize a provider release.
+        if (!keeps(payments.findById(a.orderId()).orElse(null), a.authorizationCode())) {
+          oldest = oldest == null || a.grantedAt().isBefore(oldest) ? a.grantedAt() : oldest;
+        }
         continue;
       }
       try {
+        boolean retired =
+            decisions.execute(
+                a.authorizationCode(),
+                a.orderId(),
+                decision -> {
+                  Payment payment = payments.findById(a.orderId()).orElse(null);
+                  if (decision.isRetired()) {
+                    return true;
+                  }
+                  if (keeps(payment, a.authorizationCode())) {
+                    decision.claim(); // includes authorized rows written before this table existed
+                    return false;
+                  }
+                  decision.retire();
+                  return true;
+                });
+        if (!retired) {
+          continue;
+        }
+        // Irreversible retirement has committed and the DB lock is gone before provider I/O.
         if (processor.releaseAuthorization(a.orderId(), a.authorizationCode())) {
           count++;
           released.increment();
           log.warn(
-              "released authorization {} of order {}, not kept by its {} payment",
-              a.authorizationCode(),
-              a.orderId(),
-              payment == null ? "absent" : payment.getStatus());
+              "released retired authorization {} of order {}", a.authorizationCode(), a.orderId());
         }
       } catch (RuntimeException e) {
         oldest = oldest == null || a.grantedAt().isBefore(oldest) ? a.grantedAt() : oldest;

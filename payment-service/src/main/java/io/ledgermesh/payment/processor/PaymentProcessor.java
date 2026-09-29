@@ -12,8 +12,9 @@ import java.util.List;
  * reconciliation: a listing of the merchant's outstanding authorizations, each with the merchant's
  * reference (the order id), its code and when it was granted; the release of one authorization by
  * its code; and the release of every authorization under a reference but one. With those, the
- * payment service's reconciler releases every authorization its payment does not keep once it is
- * older than the longest call plus a commit, whatever became of the answer.
+ * payment service can durably retire unkept authorizations after a courtesy grace window, then
+ * retry their release. The window is not a commit deadline or unconditional cleanup bound: late
+ * answers are rejected by the durable retirement decision, not by their age.
  */
 public interface PaymentProcessor {
 

@@ -158,8 +158,9 @@ payment waiting for it. Such an order is compensated like any cancellation, its 
 payment voided and its authorization released at the processor, and a summary the harness writes now
 counts it under `cancelled (deadline)` with its reason instead of under `failed / stuck`. Before
 teardown the harness waits the payment service's reconciliation grace period plus one interval (read
-from its gauges, 17 s with the defaults, or `CHAOS_INFLIGHT_WAIT`), so that any authorization no
-payment keeps has been released by the reconciler, then reads every order, its timeline, its
+from its gauges, 17 s with the defaults, or `CHAOS_INFLIGHT_WAIT`) before checking that any
+authorization no payment keeps has been released. This wait is not an unconditional cleanup bound:
+provider/database failures, scheduling delays or large listings can require further passes. It then reads every order, its timeline, its
 payment, its stock holds and the synthetic processor's authorizations from the three databases into
 `chaos/out/final.json`, waiting up to `CHAOS_DRAIN_TIMEOUT` for compensations still on their way;
 the `ledger` line fails the run on any money or stock rule broken, and `orders to read` lists every
@@ -393,8 +394,14 @@ arrives before any payment leaves a voided marker, so the late reservation or re
 the processor. A payment keeps one authorization while it is authorized and none otherwise, and a
 reconciler in the payment service releases every outstanding authorization older than a grace period
 (the longest processor call plus a commit allowance, 10 s by default) that its payment does not
-keep, every 5 s, so no authorization survives more than the grace period plus one interval unless
-its payment keeps it, including one whose answer's commit was lost. Voids, authorizations and
+keep, every 5 s. Grace plus one interval is an expected window only while the database and processor
+are available and scheduling/listing throughput permits it. A durable, order-bound decision row
+serializes claims and retirement before reading the payment: retirement commits before the
+processor release, and a retired late answer cannot complete a payment. A failed release is retried
+on later outstanding-hold passes; tombstones are retained across restarts. Existing authorized
+payments are recognized when first encountered. The [authorization upgrade guide](docs/authorization-upgrade.md)
+requires draining and stopping old payment binaries; mixed-version rolling upgrades are unsafe.
+Voids, authorizations and
 approvals the payment does not keep also make a release due at once, which the sweeper asks the
 processor for behind its breaker and time limit. Every cancellation is answered with
 `payment.voided`, and until that answer arrives the reaper sends `order.cancelled` again every

@@ -45,8 +45,8 @@ ledgermesh:
   payment:
     sweep-grace: 3s
     sweep-ms: 1000
-    # how long the commit of a processor answer may take; with the longest call it makes the
-    # grace period the reconciler leaves an authorization alone for
+    # Courtesy window added to the longest processor call, not a maximum commit duration.
+    # Durable retirement rejects a later answer; failures/backlog can delay release beyond it.
     reconcile:
       commit-allowance: 5s
     reconcile-ms: 5000

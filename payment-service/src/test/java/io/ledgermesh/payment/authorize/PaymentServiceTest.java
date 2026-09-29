@@ -66,6 +66,7 @@ class PaymentServiceTest {
   @Autowired private PaymentAuthorizer authorizer;
   @Autowired private OutboxWriter outboxWriter;
   @Autowired private TransactionTemplate tx;
+  @Autowired private AuthorizationDecisions decisions;
   @Autowired private Clock clock;
   @Autowired private EventCodec codec;
   @Autowired private IdempotentConsumer idempotent;
@@ -390,6 +391,7 @@ class PaymentServiceTest {
             authorizer,
             outboxWriter,
             tx,
+            decisions,
             clock,
             new SimpleMeterRegistry(),
             Duration.ZERO,
@@ -665,6 +667,7 @@ class PaymentServiceTest {
         authorizer,
         outboxWriter,
         tx,
+        decisions,
         clock,
         new SimpleMeterRegistry(),
         Duration.ZERO,
