@@ -6,6 +6,7 @@ import static org.awaitility.Awaitility.await;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.ledgermesh.order.saga.StuckOrderReaper;
 import io.ledgermesh.payment.domain.PaymentRepository;
+import io.ledgermesh.payment.processor.AuthorizationHolds;
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -42,6 +43,7 @@ class ReservationTimeoutIT {
     try {
       id = Stack.createOrder("cust-deadline", SKU, 2, new BigDecimal("4.00"));
       await().atMost(TIMEOUT).until(() -> paymentStatus(id).equals("AUTHORIZED"));
+      assertThat(holdsAtProcessor(id)).isEqualTo(1);
       assertThat(Stack.stock(SKU)).isEqualTo(8);
       assertThat(Stack.orderStatus(id)).isEqualTo("PENDING");
 
@@ -55,6 +57,8 @@ class ReservationTimeoutIT {
 
     await().atMost(TIMEOUT).until(() -> Stack.stock(SKU) == 10);
     await().atMost(TIMEOUT).until(() -> paymentStatus(id).equals("VOIDED"));
+    await().atMost(TIMEOUT).until(() -> holdsAtProcessor(id) == 0);
+    await().atMost(TIMEOUT).until(() -> !Stack.getOrder(id).get("compensatedAt").isNull());
 
     // the answers the listener had not read arrive after the cancellation and change nothing; they
     // come on two topics, so either may be applied first
@@ -66,7 +70,12 @@ class ReservationTimeoutIT {
     assertThat(Stack.stock(SKU)).isEqualTo(10);
   }
 
-  private static String paymentStatus(String orderId) {
+  /** Authorizations the processor still holds on the card for the order. */
+  static int holdsAtProcessor(String orderId) {
+    return Stack.payment.getBean(AuthorizationHolds.class).outstanding(orderId);
+  }
+
+  static String paymentStatus(String orderId) {
     return Stack.payment
         .getBean(PaymentRepository.class)
         .findById(orderId)
@@ -75,7 +84,7 @@ class ReservationTimeoutIT {
   }
 
   /** Whether the order's timeline records an event of this type that moved nothing. */
-  private static boolean ignored(String orderId, String type) {
+  static boolean ignored(String orderId, String type) {
     JsonNode timeline =
         Stack.send(
             "GET",
@@ -90,7 +99,7 @@ class ReservationTimeoutIT {
   }
 
   /** Puts the order's reservation deadline in the past, as a long enough absence would have. */
-  private static void expireDeadline(String orderId) throws Exception {
+  static void expireDeadline(String orderId) throws Exception {
     try (Connection connection =
             DriverManager.getConnection(
                 Stack.jdbcUrl("orders"),
