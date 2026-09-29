@@ -1,8 +1,9 @@
 # Architecture
 
 LedgerMesh is three Spring Boot services that complete an order through a choreographed saga
-over Kafka. The design goal is simple to state: killing any one service at any moment must not
-change the outcome of any order. This document explains the mechanisms that make that true.
+over Kafka. A process crash must not discard committed work or leave a cancelled order charged.
+An outage can still exhaust a saga deadline and lead to cancellation rather than confirmation.
+This document explains replay, compensation and the limits of those guarantees.
 
 ## Services and topics
 
@@ -38,10 +39,12 @@ change the outcome of any order. This document explains the mechanisms that make
 | `order.payment_requested` | order | payment | the payment deadline passed; answer with the outcome on file or attempt now |
 
 Every topic has three partitions and every message is keyed by order id, so all events for one
-order are processed in sequence within a topic. Across topics they are not: each topic has a
-listener container and threads of its own, so one order's events on two topics can be handled at
-the same moment, and what both of them write has to hold up under that (the reservation ledger and
-the payment's two creators below).
+order are processed in sequence within a topic. Across topics they are not ordered. The inventory
+and payment services give each topic a listener container and threads of its own, so one order's
+events on two of their topics can be handled at the same moment, and what both of them write has
+to hold up under that (the reservation ledger and the payment's two creators below). The order
+service consumes its four topics in one container, `order-saga`, whose three consumer threads
+share the partitions of all four.
 
 ## Transactional outbox
 
@@ -217,6 +220,11 @@ topics are consumed by independent listener containers, so this is what makes th
 irrelevant; a reservation delivered again under a fresh event id (a replayed dead letter) finds its
 own rows and takes nothing twice.
 
+This ledger cannot reconstruct stock deducted by 5.0.0, which had no reservation rows. Drain open
+orders and finish their compensations on the old inventory service before upgrading. A new-version
+release with no historical reservation credits zero and leaves a released marker; it does not infer
+the missing amount from an order payload. See the [upgrade guide](docs/authorization-upgrade.md).
+
 Redis holds `stock:{sku}` with a TTL. Writes are write-through but deferred to `afterCommit`, so
 the cache never shows a value that was rolled back; the TTL bounds the damage of a missed write.
 `GET /stock/{sku}` reads the cache first and falls back to the database. Cache reads sit behind a
@@ -279,13 +287,22 @@ not keep. A payment keeps exactly one code, the one it is authorized under, and 
 voided, declined, open or absent: an open payment has not committed that approval and will be
 attempted again under a new code. The grace period is the longest a processor call can run, the
 longest of the processor's own bound and the configured time limits (5 s here), plus
-`ledgermesh.payment.reconcile.commit-allowance` (5 s) for the answer to be committed; an
-authorization younger than that may be on its way to becoming the kept one and is left alone, and
-the kept code is never released. The guarantee is therefore: no authorization survives more than the
-grace period plus one reconciliation interval (15 s by default) unless its payment keeps it,
-whatever became of the answer that granted it. A real processor has to offer what the reconciler
-uses, a listing of the merchant's outstanding authorizations with their reference and grant time and
-a release by code, which card processors provide for reconciliation.
+`ledgermesh.payment.reconcile.commit-allowance` (5 s) as a courtesy window for a returning answer.
+Age alone cannot prove that an answer will never commit. Approval and reconciliation instead lock
+the same durable `authorization_decision` row before reading fresh payment state. A successful
+claim, payment authorization and completion outbox event commit atomically. Reconciliation either
+recognizes the kept code (including pre-upgrade payments) or commits irreversible retirement, then
+calls the provider outside the transaction. A late retired-code approval emits no completion and
+leaves an open payment retryable. A release failure or process death after retirement leaves the
+tombstone for a later outstanding-hold pass. Concurrent missing-row insertion retries the whole
+transaction after rollback; different codes still arbitrate through the payment's version.
+
+Grace plus one interval is only an expected cleanup window while scheduling, database/provider
+availability and listing throughput permit it. A future real-provider adapter must supply the
+listing/release operations and scope authorization keys by provider/account if required; this
+repository validates a synthetic provider, not a live card-network integration. Old payment
+binaries ignore retirement, so [upgrade requires stop/drain](docs/authorization-upgrade.md), not
+mixed-version rolling operation.
 `ledgermesh.payments.reconciled.released` counts what it released and
 `ledgermesh.payments.unkept.oldest.seconds` is the age of the oldest outstanding authorization no
 payment keeps.
@@ -320,7 +337,7 @@ freshness after placing an order. It is decorated with `@CircuitBreaker` and `@T
 Caffeine cache, marked `source: cache`, or `unknown` when nothing was ever fetched. The saga never
 depends on this path.
 
-## Why a kill never fails an order
+## What survives a process crash
 
 Take any moment in an order's life and kill inventory or payment:
 
@@ -336,8 +353,10 @@ Take any moment in an order's life and kill inventory or payment:
 6. Payment specifically, between recording and authorizing: the sweeper finds the open payment.
 
 Every step is either durable or replayable, and every replay is idempotent. The order service
-keeps accepting orders throughout because it only needs its own database to commit, which is why
-the chaos run reports `failed / stuck 0` while one service is down.
+can keep accepting orders while inventory or payment is down because intake needs its own database
+to commit. An order-service outage interrupts intake, and client retries use the idempotency key.
+The measured chaos runs report `failed / stuck 0`; this is evidence for those runs, not a promise
+that every outage duration or infrastructure failure preserves confirmation instead of cancellation.
 
 Killing the order service is different in one way: the saga deadlines run on its clock, and they
 keep running while it is away. An order whose reservation window is used up by the order service's

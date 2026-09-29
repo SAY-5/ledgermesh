@@ -36,6 +36,21 @@ clear a backlog, and never repair a failed release by reclaiming its code.
 
 ## Stop/drain upgrade (not rolling)
 
+### Inventory prerequisite for 5.0.0
+
+The inventory upgrade has a separate limitation: 5.0.0 deducted stock without reservation rows.
+The new ledger cannot reconstruct those deductions; a release with no reservation credits zero
+and leaves a released marker. Before upgrading inventory, stop new intake, let open orders reach
+terminal states, and verify their compensations finished on the old inventory service. Terminal
+order status alone is not proof that a queued release has been applied.
+
+If inventory was already upgraded with old holds outstanding, reconcile those deductions from
+audited pre-upgrade records before adjusting stock. Do not invent reservation quantities or replay
+an order payload as a stock credit: that can double-credit an already compensated order. The payment
+compensation resend endpoint does not backfill the missing inventory history.
+
+### Payment activation
+
 Old binaries do not consult the decision table and can accept retired authorizations. Adding the
 table alone cannot protect a mixed deployment.
 

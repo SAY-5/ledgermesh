@@ -3,7 +3,7 @@
 Dates are the commit dates of the release tags. Each numbered release is a demo milestone;
 see the versioning note in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Unreleased
+## v6.0.0 (2026-09-29)
 
 * An order cancelled at a saga deadline kept the payment authorized for it. The payment service
   authorizes off `inventory.reserved` whatever the order has become since, and only inventory read
@@ -27,14 +27,26 @@ see the versioning note in [CONTRIBUTING.md](CONTRIBUTING.md).
   an authorization with a code of its own, a payment keeps one while it is authorized and none
   otherwise, and a reconciler in the payment service lists the processor's outstanding
   authorizations every 5 s and releases every one its payment does not keep once it is older than
-  the grace period, the longest processor call plus a commit allowance (10 s by default). No
-  authorization survives more than the grace period plus one interval unless its payment keeps it.
+  the grace period, the longest processor call plus a commit allowance (10 s by default). Grace
+  plus one interval is an expected cleanup window only when provider/database availability,
+  scheduling and listing throughput permit it, not an unconditional bound.
   Voids, authorizations, approvals a payment does not keep and cancellations sent again also have
   the sweeper ask the processor at once, behind its breaker and time limit, to release all but the
   kept code, for settled payments only. The synthetic processor keeps what it granted in a
   `processor_hold` table of its own, one row per authorization, committed apart from the payment
   service's transactions, and it and its table exist only while `ledgermesh.processor.synthetic` is
   on.
+* Review of the unreleased reconciler found two further orderings: a late answer could authorize
+  an already released hold, or reconciliation could release a hold claimed after its payment
+  snapshot. Durable, order-bound `authorization_decision` rows now serialize claim and retirement
+  before fresh payment reads. Claim, payment and completion outbox commit together; irreversible
+  retirement commits before provider release. First-insert conflicts retry only after full
+  rollback, and failed releases retry from outstanding listings without reviving retired codes.
+  The same race contract runs on H2 and PostgreSQL 16, including a legacy-schema upgrade.
+* **Payment upgrade requires stop/drain, not a mixed-version rolling deployment.** Stop all old
+  listeners, sweepers and callback-capable processes before activating the new protocol. Preserve
+  decision tombstones, including on restart; an old binary is not a safe rollback target while
+  retired-code callbacks remain possible. See the [operator upgrade guide](docs/authorization-upgrade.md).
 * A cancellation the payment service could not apply before its retries ran out went to
   `order.cancelled.dlq`, where only an operator's replay could bring it back, and the charge stayed.
   The payment service now answers every cancellation with `payment.voided`, the order service
@@ -68,11 +80,19 @@ see the versioning note in [CONTRIBUTING.md](CONTRIBUTING.md).
   inserted, and the `repeat` workflow runs `ExactlyOnceIT` 50 times on every pull request that
   changes that code.
 * A payment has two creators on two topics, the `inventory.reserved` listener and a re-drive that
-  finds no payment on file, and it was saved with a merge as well: a creator that saved after the
-  other had committed the same order overwrote that payment with its own copy. A new payment is now
-  always inserted and flushed, so the second creator fails on the primary key before it calls the
-  processor and takes the payment on file when the error handler delivers it again. A new order is
-  inserted without the read a merge made first.
+  finds no payment on file, and it was saved with a merge as well. The listener commits the payment
+  it records before it attempts it, so a re-drive that saved in between overwrote that payment with
+  its own copy. In 5.0.0 a re-drive recorded and attempted its payment in one transaction, and its insert
+  reached the table only after the processor call: a reservation that saved in that window stored
+  and authorized a payment of its own, and the re-drive, which had already called the processor,
+  then failed on the primary key, so the processor authorized the order twice and only one was
+  recorded. A reservation that came after the re-drive had committed failed on the optimistic lock
+  and its redelivery took the payment on file. A new payment is now always inserted and flushed, so
+  the second creator fails on the primary key before it calls the processor and takes the payment
+  on file when the error handler delivers it again. A new order is inserted without the read a
+  merge made first. Both listeners now finish their recording transaction before processor I/O;
+  concurrent attempts can still produce surplus authorizations, but only one can be kept and the
+  rest are released.
 * The order service counts a created or changed order in `ledgermesh.orders.transitions` and logs
   it only once its transaction has committed, so the loser of a race on one idempotency key no
   longer shows up in either.
@@ -85,6 +105,11 @@ see the versioning note in [CONTRIBUTING.md](CONTRIBUTING.md).
 * Inventory keeps a reservation row per order and sku: a release credits exactly what that order
   held, a release that arrives before its reservation leaves stock untouched and blocks the late
   reservation, and a repeated reservation takes stock once.
+* Stock that a 5.0.0 inventory service reserved has no reservation rows, so when its order is
+  cancelled after the upgrade the release credits nothing and leaves released markers instead. Let
+  open orders reach CONFIRMED or CANCELLED, and let their compensations finish on the old inventory
+  service before upgrading it. Existing legacy deductions are not automatically reconstructed or
+  credited by the new reservation ledger.
 * The chaos harness kills the order service as well, sends an `Idempotency-Key` per order and
   retries it while intake is away, seeds the kill schedule from `CHAOS_SEED`, tears the stack down
   on every exit path, stamps commit, host, Docker version and knobs into the summary, records runs

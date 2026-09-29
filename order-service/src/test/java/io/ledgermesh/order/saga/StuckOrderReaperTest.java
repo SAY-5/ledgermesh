@@ -14,10 +14,13 @@ import io.ledgermesh.order.domain.OrderItem;
 import io.ledgermesh.order.domain.OrderRepository;
 import io.ledgermesh.order.domain.OrderStatus;
 import io.ledgermesh.order.domain.SagaEvent;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -34,6 +37,7 @@ class StuckOrderReaperTest {
   @Autowired private OrderEventRepository timeline;
   @Autowired private OutboxEventRepository outbox;
   @Autowired private Clock clock;
+  @Autowired private MeterRegistry meters;
 
   @BeforeEach
   void clean() {
@@ -64,6 +68,10 @@ class StuckOrderReaperTest {
   void paymentPastDeadlineIsRedrivenOnceThenCancelled() {
     Order order = saga.create("cust-1", List.of(new OrderItem("sku-1", 1, new BigDecimal("5.00"))));
     saga.apply(order.getId(), SagaEvent.INVENTORY_RESERVED, "c");
+    double redrives = redrives();
+    Timer latency = meters.get("ledgermesh.saga.latency").timer();
+    long completed = latency.count();
+    double seconds = latency.totalTime(TimeUnit.SECONDS);
 
     advance(Duration.ofSeconds(46));
     assertThat(reaper.reap()).isEqualTo(1);
@@ -75,6 +83,8 @@ class StuckOrderReaperTest {
         .extracting(OutboxEvent::getTopic)
         .containsExactly(Topics.ORDER_CREATED, Topics.PAYMENT_REQUESTED);
     assertThat(outbox.findAll().get(1).getPayload()).contains("\"redrive\":1");
+    assertThat(redrives()).isEqualTo(redrives + 1);
+    assertThat(latency.count()).isEqualTo(completed);
 
     advance(Duration.ofSeconds(46));
     assertThat(reaper.reap()).isEqualTo(1);
@@ -84,6 +94,10 @@ class StuckOrderReaperTest {
     assertThat(outbox.findAll())
         .extracting(OutboxEvent::getTopic)
         .containsExactly(Topics.ORDER_CREATED, Topics.PAYMENT_REQUESTED, Topics.ORDER_CANCELLED);
+    assertThat(redrives()).isEqualTo(redrives + 1);
+    // the saga ended 92 seconds after the order was created
+    assertThat(latency.count()).isEqualTo(completed + 1);
+    assertThat(latency.totalTime(TimeUnit.SECONDS)).isEqualTo(seconds + 92);
   }
 
   @Test
@@ -115,6 +129,10 @@ class StuckOrderReaperTest {
         .isEqualTo(OrderStatus.CONFIRMED);
     advance(Duration.ofSeconds(60));
     assertThat(reaper.reap()).isZero();
+  }
+
+  private double redrives() {
+    return meters.counter("ledgermesh.saga.redrives").count();
   }
 
   @Test

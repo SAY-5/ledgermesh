@@ -77,8 +77,8 @@ public class Payment {
    * Null until the payment is inserted, which is how the repository tells a new payment from a
    * stored one: the id is the order id, assigned rather than generated. A primitive version would
    * make it merge a new payment, and a merge reads the row first, so a creator that saves after
-   * another has committed the same order would overwrite that payment instead of failing on the
-   * primary key.
+   * another has committed the same order, before anything has attempted that payment, would
+   * overwrite it instead of failing on the primary key.
    */
   @Version
   @Column(nullable = false)

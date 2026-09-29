@@ -7,9 +7,9 @@ order, that none was lost and none is left charged, in the payment ledger or on 
 being confirmed.
 
 `make chaos` starts the stack, submits orders at 20/s for 60 s, kills the inventory, payment or
-order service three times at random moments (restarting each after 5 s), waits for the saga
-backlog to drain and asserts every order reached CONFIRMED, or CANCELLED for stock or for a saga
-deadline, with money and stock following the outcome: a confirmed order paid once and holding its
+order service three times, with moments and victims drawn from `CHAOS_SEED` (restarting each after
+5 s), waits for the saga backlog to drain and asserts every order reached CONFIRMED, or CANCELLED
+for stock or for a saga deadline, with money and stock following the outcome: a confirmed order paid once and holding its
 stock, a cancelled one charged nothing, holding nothing and with nothing left on the card.
 
 ## Architecture
@@ -49,10 +49,10 @@ stock, a cancelled one charged nothing, holding nothing and with nothing left on
 * **common**: event contracts, topic names, transactional outbox relay, idempotent consumer,
   correlation ids, breaker transition metrics.
 
-Kill any one service at any moment and the outcome of every order is unchanged: the outbox makes
-every event durable before it is sent, idempotent consumers make every redelivery harmless, and
-the deferred queue makes a lost payment attempt resumable. [ARCHITECTURE.md](ARCHITECTURE.md)
-walks through each failure point.
+The outbox makes events durable before sending, idempotent consumers protect redelivery, and the
+deferred queue makes a lost payment attempt resumable. A service outage can still consume a saga
+deadline and change confirmation into cancellation; compensation must then leave no charge or hold.
+[ARCHITECTURE.md](ARCHITECTURE.md) walks through each failure point.
 
 ## Quick start
 
@@ -226,7 +226,7 @@ final ledger, summary); the harness tears the stack down on every exit path unle
 
 ```bash
 make lint     # spotless (google-java-format)
-make test     # mvn verify: 133 unit tests + 18 integration tests
+make test     # mvn verify: unit, PostgreSQL ownership/upgrade, and end-to-end tests
 ```
 
 Unit tests (H2, no Docker): saga state machine transitions and compensation, deadline reaper (silent
@@ -258,6 +258,12 @@ never confirmed, the open and overdue saga counts behind the ops overview, saga 
 lines that wait for the commit, and the reservation ledger (a release credits what the order held, a
 release before the reservation is a no-op that blocks the late reservation, a repeated reservation
 takes stock once).
+
+The authorization ownership contract also runs on PostgreSQL 16: late approval after retirement,
+both claim/reconcile lock orderings, first-insert contention, competing-code rollback, cancellation,
+release failure and coordinator recreation, legacy kept codes, cross-order binding, and rejection
+of ambient transactions. Its PostgreSQL fixture boots over a pre-existing payment table and verifies
+that the additive decision schema preserves an authorized row.
 
 Integration tests (`e2e-tests`, Testcontainers Redpanda + Postgres + Redis, all three services
 booted in one JVM): an order flows to CONFIRMED end to end, out of stock and declined payment paths
@@ -481,6 +487,13 @@ prints the overview of all three services at the end of a run.
 
 Every entry in full is in [CHANGELOG.md](CHANGELOG.md).
 
+* **v6.0.0**: fixes duplicate orders from one idempotency key, payment creation races, and missing
+  cancellation compensation. Durable authorization claims and retirement prevent late answers
+  from keeping released holds and reconciliation from releasing a concurrently kept code. Also adds
+  a per-order/sku reservation ledger, parked dead letters and processor-side chaos ledger audits.
+  [Stop/drain old payment binaries before upgrading](docs/authorization-upgrade.md). Stock reserved
+  by 5.0.0 has no reservation rows: finish open orders and their old-inventory compensations first;
+  the new ledger does not automatically credit legacy deductions.
 * **v5.0.0**: `GET /ops/overview` per service (health, consumer lag, dead letter depth, breaker
   states, in flight and stuck sagas), a `ledgermesh.saga.stuck` gauge, a `tight` chaos profile with
   twice the kills and a two second restart, and the overview in the chaos summary.
