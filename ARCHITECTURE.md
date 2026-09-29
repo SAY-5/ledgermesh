@@ -33,7 +33,7 @@ change the outcome of any order. This document explains the mechanisms that make
 | `inventory.rejected` | inventory | order | out of stock or unknown sku; order is CANCELLED |
 | `payment.completed` | payment | order | order is CONFIRMED |
 | `payment.failed` | payment | order | order is CANCELLED and compensation is emitted |
-| `order.cancelled` | order | inventory | release the reservation |
+| `order.cancelled` | order | inventory, payment | release the reservation; void the payment, or block it if not made yet |
 | `order.payment_requested` | order | payment | the payment deadline passed; answer with the outcome on file or attempt now |
 
 Every topic has three partitions and every message is keyed by order id, so all events for one
@@ -140,8 +140,10 @@ RESERVED + PAYMENT_TIMEOUT     -> CANCELLED (PAYMENT_TIMEOUT), emit order.cancel
 Payment outcomes are also accepted from PENDING because the two inbound topics are independent
 and a payment can only exist for a reserved order. When a payment is declined the order service
 writes `order.cancelled` to its outbox in the same transaction as the cancellation; the inventory
-service releases the reserved units, again idempotently. A legitimate CANCELLED (out of stock or
-declined card) is a correct business outcome and is reported separately from failures.
+service releases the reserved units, again idempotently. The payment service reads the same event
+and voids the order's payment (below). A legitimate CANCELLED (out of stock, a declined card, or a
+saga deadline that ran out) is a correct business outcome and is reported separately from
+failures.
 
 ## Deadlines, the reaper and the timeline
 
@@ -160,8 +162,20 @@ described below rejects the `order.created` if it turns up later. A silent payme
 goes to the payment service, which either re-emits `payment.completed` / `payment.failed` under a
 fresh event id (the first copy evidently never applied) or attempts the payment now (recording it
 from the request when it was never seen). Only a second expiry cancels with `PAYMENT_TIMEOUT`. A
-payment outcome that arrives after that is recorded in the timeline as ignored and left for
-reconciliation; the terminal rule of the state machine still holds.
+payment outcome that arrives after that is recorded in the timeline as ignored, and the terminal
+rule of the state machine still holds; the payment itself is voided by the payment service when
+`order.cancelled` reaches it, so the customer is not charged for the cancelled order.
+
+A deadline runs on the wall clock, and the order service's own absences count against it. An
+order placed just before the order service went away, whose reservation window its absences used
+up, is cancelled by the reaper's first tick after a restart, before the answers to it have been
+applied. The chaos run of seed 1040 killed the order service three times and cancelled six orders
+that way, each 61 to 62 s after it was placed: three had their reservation and the payment
+authorized off it waiting unread on the order service's topics, applied as ignored a fraction of a
+second after the cancellation, and three still had their `order.created` in the order service's
+outbox, so inventory reserved and payment authorized them just after they were cancelled. Either
+way the cancellation is compensated in full, stock released and payment voided, and the chaos
+summary reports it under `cancelled (deadline)` rather than as a failure.
 
 Every step, including ignored and late events, is appended to `order_event` in the same
 transaction as the change it describes and served by `GET /orders/{id}/timeline`. Because the row
@@ -213,6 +227,17 @@ before it calls the processor. Its transaction rolls back, and the error handler
 record again; this time it finds the payment on file, so the reservation leaves a settled payment
 alone and the re-drive attempts an open one or re-emits a settled one's outcome.
 
+A cancelled order's payment has to come back. The payment service authorizes off
+`inventory.reserved` whatever the order has become since, so it also consumes `order.cancelled`:
+an authorized payment is voided (its authorization code kept as the record), an open one is voided
+before the sweeper or a re-drive can attempt it, and a declined one is left alone. A cancellation
+that finds no payment on file, because the reservation has not reached the payment service yet,
+inserts a voided marker for nothing, the way inventory leaves a released marker, so the late
+reservation and any re-drive find the order given up and charge nothing. The marker is inserted
+like a payment, so a race with either creator ends on the primary key and a redelivery onto the
+winner's row. An authorization already in flight when the void commits finds the payment settled
+when it tries to commit its outcome, and is dropped with no `payment.completed`.
+
 The synthetic processor is deterministic: outcomes depend only on the order id and the attempt
 number, so a run is reproducible and the retry and breaker paths are exercised on every run.
 
@@ -243,6 +268,14 @@ Every step is either durable or replayable, and every replay is idempotent. The 
 keeps accepting orders throughout because it only needs its own database to commit, which is why
 the chaos run reports `failed / stuck 0` while one service is down.
 
+Killing the order service is different in one way: the saga deadlines run on its clock, and they
+keep running while it is away. An order whose reservation window is used up by the order service's
+own absences is cancelled for `RESERVATION_TIMEOUT` when it comes back, and compensated: the
+release returns its stock and the void returns its payment. That is an outcome, not a failure, and
+the chaos harness checks it as one, from the ledger it reads out of the three databases at the end
+of a run: every order confirmed and paid once with its stock held, or cancelled with nothing
+charged and nothing held.
+
 ## Observability
 
 Every service exposes `/actuator/health/{liveness,readiness}`, `/actuator/prometheus` and
@@ -270,6 +303,7 @@ meters:
 | `ledgermesh.dlq.parked.depth{topic}` | all | records retained on `<topic>.parked` |
 | `ledgermesh.breaker.transitions{name,from,to}` | all | breaker history |
 | `ledgermesh.payments.by_state`, `.deferred`, `.outcomes` | payment | deferred queue |
+| `ledgermesh.payments.voided{was}` | payment | payments voided for cancelled orders, by the state they were in (`NONE` for a marker) |
 | `ledgermesh.cache.reads{result}` | inventory | cache hit ratio |
 | `ledgermesh.inventory.reservations{result}` | inventory | reservations reserved or rejected |
 | `ledgermesh.inventory.releases{result}` | inventory | compensations that released units, or found nothing to release |
