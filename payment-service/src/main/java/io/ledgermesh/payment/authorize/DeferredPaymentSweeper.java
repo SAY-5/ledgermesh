@@ -6,7 +6,9 @@ import org.springframework.stereotype.Component;
 
 /**
  * Drains the deferred queue (payments the listener could not finish, or that were deferred) and
- * asks the processor again for every release of a voided payment it has not confirmed.
+ * asks the processor for every release that is due. It is the only place releases are asked for, so
+ * {@code ledgermesh.payment.sweeper=false}, which the unit tests set to drive it by hand, would
+ * leave every authorization a payment does not keep on the card; no deployment should set it.
  */
 @Component
 @ConditionalOnProperty(

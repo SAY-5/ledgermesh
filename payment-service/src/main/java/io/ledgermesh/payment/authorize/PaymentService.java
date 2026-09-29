@@ -243,21 +243,37 @@ public class PaymentService {
   }
 
   /**
-   * An answer the processor gave after its time limit. It is committed like any other, and retried
-   * when a concurrent write to the payment won the version, so it cannot be lost to a race.
+   * An answer the processor gave after its time limit. It is committed like any other, and tried
+   * again when a concurrent write to the payment won the version. If it still cannot be committed,
+   * a release is made due on the payment without regard to its version: an approval that is not
+   * committed must not stay on the card, and one the payment should have kept is kept by the next
+   * attempt, whose authorization makes a release of the others due in turn.
    */
   @EventListener
   public void onLateOutcome(LateOutcome late) {
     meters.counter("ledgermesh.payments.late_outcomes").increment();
-    for (int tries = 1; ; tries++) {
+    for (int tries = 1; tries <= 5; tries++) {
       try {
         commit(late.orderId(), late.outcome());
         return;
       } catch (OptimisticLockingFailureException e) {
-        if (tries >= 5) {
-          throw e;
-        }
+        sleepQuietly(20L * tries);
+      } catch (RuntimeException e) {
+        log.warn("late answer for order {} not committed: {}", late.orderId(), e.toString());
+        break;
       }
+    }
+    if (late.outcome() instanceof AuthorizationOutcome.Authorized) {
+      payments.releaseOwed(late.orderId(), clock.instant());
+      log.warn("late approval for order {} not committed, release made due", late.orderId());
+    }
+  }
+
+  private static void sleepQuietly(long millis) {
+    try {
+      Thread.sleep(millis);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
     }
   }
 

@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
@@ -462,6 +463,40 @@ class PaymentServiceTest {
     assertThat(payments.findById("o26").orElseThrow().getStatus()).isEqualTo(PaymentStatus.VOIDED);
     verify(processor, times(2)).release("o26", null);
     assertThat(topics()).containsExactly(Topics.PAYMENT_VOIDED);
+  }
+
+  /**
+   * A late approval that loses every try to commit to concurrent writes is not dropped: a release
+   * is made due on the payment regardless of its version.
+   */
+  @Test
+  void aLateApprovalThatCannotBeCommittedStillMakesAReleaseDue() {
+    when(processor.authorize(anyString(), anyString(), any(), anyInt()))
+        .thenReturn(new Approved("AUTH-37"));
+    service.record(reserved("o37"), "c");
+    service.attempt("o37");
+    assertThat(service.sweepReleases()).isEqualTo(1);
+    PaymentRepository contended = mock(PaymentRepository.class, delegatesTo(payments));
+    doThrow(new OptimisticLockingFailureException("another write won"))
+        .when(contended)
+        .findById("o37");
+    PaymentService losing =
+        new PaymentService(
+            contended,
+            authorizer,
+            outboxWriter,
+            tx,
+            clock,
+            new SimpleMeterRegistry(),
+            Duration.ZERO,
+            Duration.ZERO);
+
+    losing.onLateOutcome(
+        new LateOutcome("o37", new AuthorizationOutcome.Authorized("AUTH-37-LATE")));
+
+    assertThat(payments.findById("o37").orElseThrow().getReleaseDueAt()).isNotNull();
+    assertThat(service.sweepReleases()).isEqualTo(1);
+    verify(processor, times(2)).release("o37", "AUTH-37");
   }
 
   /**

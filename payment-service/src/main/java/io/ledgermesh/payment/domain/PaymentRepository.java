@@ -25,7 +25,7 @@ public interface PaymentRepository extends JpaRepository<Payment, String> {
    * started from; returns 0 when the row changed meanwhile, which leaves the release due.
    */
   @Transactional
-  @Modifying
+  @Modifying(clearAutomatically = true)
   @Query(
       "update Payment p set p.releaseDueAt = null, p.releasedAt = :now, p.releaseAttempts = 0,"
           + " p.version = p.version + 1"
@@ -38,7 +38,7 @@ public interface PaymentRepository extends JpaRepository<Payment, String> {
    * the processor is asked again about each of them; returns how many.
    */
   @Transactional
-  @Modifying
+  @Modifying(clearAutomatically = true)
   @Query(
       "update Payment p set p.releaseDueAt = :now, p.version = p.version + 1"
           + " where p.updatedAt >= :since and p.releaseDueAt is null"
@@ -48,11 +48,22 @@ public interface PaymentRepository extends JpaRepository<Payment, String> {
   int recheckSince(@Param("since") Instant since, @Param("now") Instant now);
 
   /**
+   * Makes a release due for the order's payment whatever its version, for an answer from the
+   * processor that could not be committed; returns how many rows it touched.
+   */
+  @Transactional
+  @Modifying(clearAutomatically = true)
+  @Query(
+      "update Payment p set p.releaseDueAt = :now, p.version = p.version + 1"
+          + " where p.orderId = :orderId")
+  int releaseOwed(@Param("orderId") String orderId, @Param("now") Instant now);
+
+  /**
    * Pushes a release the processor refused back to {@code next}, on the version of the row the
    * release started from; returns 0 when the row changed meanwhile.
    */
   @Transactional
-  @Modifying
+  @Modifying(clearAutomatically = true)
   @Query(
       "update Payment p set p.releaseDueAt = :next, p.releaseAttempts = p.releaseAttempts + 1,"
           + " p.version = p.version + 1"

@@ -101,7 +101,11 @@ public class ResilientProcessorCall {
           }
           if (!answer.complete(outcome)) {
             log.warn("processor answered order {} after its time limit: {}", orderId, outcome);
-            events.publishEvent(new LateOutcome(orderId, outcome));
+            try {
+              events.publishEvent(new LateOutcome(orderId, outcome));
+            } catch (RuntimeException e) {
+              log.error("late answer for order {} could not be handled", orderId, e);
+            }
           }
         });
     return answer;
