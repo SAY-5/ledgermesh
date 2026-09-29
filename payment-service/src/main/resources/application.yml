@@ -45,6 +45,7 @@ ledgermesh:
   payment:
     sweep-grace: 3s
     sweep-ms: 1000
+    recheck-window: 10m
     retry-delay: 2s
   outbox:
     poll-ms: 200

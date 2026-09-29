@@ -53,6 +53,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -70,6 +71,7 @@ class PaymentServiceTest {
   @Autowired private EventCodec codec;
   @Autowired private IdempotentConsumer idempotent;
   @Autowired private PaymentEventListener listener;
+  @Autowired private JdbcTemplate jdbc;
   @MockitoBean private PaymentProcessor processor;
 
   @BeforeEach
@@ -460,6 +462,32 @@ class PaymentServiceTest {
     assertThat(payments.findById("o26").orElseThrow().getStatus()).isEqualTo(PaymentStatus.VOIDED);
     verify(processor, times(2)).release("o26", null);
     assertThat(topics()).containsExactly(Topics.PAYMENT_VOIDED);
+  }
+
+  /**
+   * After a restart, every payment settled within the window is checked with the processor again,
+   * which reaches an authorization granted to a call whose answer died with the killed process.
+   */
+  @Test
+  void aRestartAsksTheProcessorAgainAboutEveryPaymentSettledRecently() {
+    when(processor.authorize(anyString(), anyString(), any(), anyInt()))
+        .thenReturn(new Approved("AUTH-35"));
+    service.record(reserved("o35"), "c");
+    service.attempt("o35");
+    service.record(reserved("o36"), "c");
+    service.attempt("o36");
+    assertThat(service.sweepReleases()).isEqualTo(2);
+    jdbc.update(
+        "update payment set updated_at = ? where order_id = ?",
+        java.sql.Timestamp.from(Instant.now().minus(Duration.ofHours(1))),
+        "o36");
+
+    new RecheckOnStart(payments, clock, Duration.ofMinutes(10)).run(null);
+
+    assertThat(payments.findById("o35").orElseThrow().getReleaseDueAt()).isNotNull();
+    assertThat(payments.findById("o36").orElseThrow().getReleaseDueAt()).isNull();
+    assertThat(service.sweepReleases()).isEqualTo(1);
+    verify(processor, times(2)).release("o35", "AUTH-35");
   }
 
   @Test
