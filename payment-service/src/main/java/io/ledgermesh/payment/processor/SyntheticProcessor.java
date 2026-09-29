@@ -17,6 +17,12 @@ import org.springframework.stereotype.Component;
  *   <li>a configurable share of first attempts fails with a transient fault (retry succeeds)
  *   <li>a smaller share of first attempts hangs past the time limit
  * </ul>
+ *
+ * <p>Every approval is recorded as an outstanding authorization in {@link AuthorizationHolds}
+ * before it is returned, and stays outstanding until {@link #release} gives it back, so a run can
+ * check that no card is left holding money for an order that was not confirmed. An approval whose
+ * caller stopped waiting (the time limiter cut it off) is outstanding all the same, as it would be
+ * at a real processor.
  */
 @Component
 public class SyntheticProcessor implements PaymentProcessor {
@@ -25,16 +31,19 @@ public class SyntheticProcessor implements PaymentProcessor {
   private final int transientPercent;
   private final int slowPercent;
   private final long slowMillis;
+  private final AuthorizationHolds holds;
 
   public SyntheticProcessor(
       @Value("${ledgermesh.processor.limit:10000}") BigDecimal limit,
       @Value("${ledgermesh.processor.transient-percent:5}") int transientPercent,
       @Value("${ledgermesh.processor.slow-percent:1}") int slowPercent,
-      @Value("${ledgermesh.processor.slow-millis:3000}") long slowMillis) {
+      @Value("${ledgermesh.processor.slow-millis:3000}") long slowMillis,
+      AuthorizationHolds holds) {
     this.limit = limit;
     this.transientPercent = transientPercent;
     this.slowPercent = slowPercent;
     this.slowMillis = slowMillis;
+    this.holds = holds;
   }
 
   @Override
@@ -52,7 +61,14 @@ public class SyntheticProcessor implements PaymentProcessor {
     if (bucket < transientPercent + slowPercent) {
       sleep(slowMillis);
     }
-    return new Approved("AUTH-" + digest(orderId).substring(0, 12).toUpperCase());
+    String code = "AUTH-" + digest(orderId).substring(0, 12).toUpperCase();
+    holds.grant(orderId, code, amount);
+    return new Approved(code);
+  }
+
+  @Override
+  public int release(String orderId) {
+    return holds.release(orderId);
   }
 
   static int bucket(String input) {

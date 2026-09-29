@@ -6,13 +6,16 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import io.ledgermesh.payment.processor.PaymentProcessor.Approved;
 import io.ledgermesh.payment.processor.PaymentProcessor.Declined;
 import java.math.BigDecimal;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 
 class SyntheticProcessorTest {
 
+  private final MemoryHolds holds = new MemoryHolds();
   private final SyntheticProcessor processor =
-      new SyntheticProcessor(new BigDecimal("100"), 5, 0, 0);
+      new SyntheticProcessor(new BigDecimal("100"), 5, 0, 0, holds);
 
   @Test
   void declinesFlaggedCustomersAndAmountsOverTheLimit() {
@@ -48,7 +51,7 @@ class SyntheticProcessorTest {
 
   @Test
   void noFaultsWhenTheShareIsZero() {
-    SyntheticProcessor steady = new SyntheticProcessor(new BigDecimal("100"), 0, 0, 0);
+    SyntheticProcessor steady = new SyntheticProcessor(new BigDecimal("100"), 0, 0, 0, holds);
     IntStream.range(0, 500).forEach(i -> steady.authorize("order-" + i, "cust", BigDecimal.TEN, 1));
   }
 
@@ -66,6 +69,26 @@ class SyntheticProcessorTest {
         .isInstanceOf(ProcessorUnavailableException.class);
   }
 
+  @Test
+  void anApprovalStaysOutstandingUntilItsOrderIsReleased() {
+    processor.authorize("o-held", "cust-declined", BigDecimal.ONE, 1);
+    assertThat(holds.outstanding("o-held")).isZero();
+
+    String code = firstApproval("o-held");
+    firstApproval("o-held");
+    assertThat(holds.outstanding("o-held")).isEqualTo(1);
+    assertThat(holds.codes).containsEntry(code, "o-held");
+
+    assertThat(processor.release("o-held")).isEqualTo(1);
+    assertThat(processor.release("o-held")).isZero();
+    assertThat(holds.outstanding("o-held")).isZero();
+
+    // an approval that lands after the release is a new hold on the card, and needs its own
+    firstApproval("o-held");
+    assertThat(holds.outstanding("o-held")).isEqualTo(1);
+    assertThat(processor.release("o-held")).isEqualTo(1);
+  }
+
   private String firstApproval(String orderId) {
     for (int attempt = 1; attempt < 10; attempt++) {
       try {
@@ -76,5 +99,38 @@ class SyntheticProcessorTest {
       }
     }
     throw new AssertionError("never approved");
+  }
+
+  /** The holds a real processor would keep, in memory for a test without a database. */
+  static final class MemoryHolds implements AuthorizationHolds {
+
+    final Map<String, String> codes = new HashMap<>();
+    final Map<String, Boolean> open = new HashMap<>();
+
+    @Override
+    public void grant(String orderId, String authorizationCode, BigDecimal amount) {
+      codes.put(authorizationCode, orderId);
+      open.put(authorizationCode, true);
+    }
+
+    @Override
+    public int release(String orderId) {
+      int released = 0;
+      for (Map.Entry<String, String> hold : codes.entrySet()) {
+        if (hold.getValue().equals(orderId) && open.get(hold.getKey())) {
+          open.put(hold.getKey(), false);
+          released++;
+        }
+      }
+      return released;
+    }
+
+    @Override
+    public int outstanding(String orderId) {
+      return (int)
+          codes.entrySet().stream()
+              .filter(h -> h.getValue().equals(orderId) && open.get(h.getKey()))
+              .count();
+    }
   }
 }

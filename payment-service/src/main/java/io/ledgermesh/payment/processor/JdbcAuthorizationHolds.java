@@ -1,0 +1,110 @@
+package io.ledgermesh.payment.processor;
+
+import java.math.BigDecimal;
+import java.sql.Timestamp;
+import java.time.Clock;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Component;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
+
+/**
+ * Keeps the synthetic processor's authorizations in a {@code processor_hold} table of their own.
+ * Every write commits in a transaction of its own, whatever the caller is in the middle of, so what
+ * the processor granted stays granted when the payment service's transaction rolls back or its
+ * process is killed, as it would at a real processor.
+ */
+@Component
+public class JdbcAuthorizationHolds implements AuthorizationHolds {
+
+  public static final String OUTSTANDING = "OUTSTANDING";
+  public static final String RELEASED = "RELEASED";
+
+  private final JdbcTemplate jdbc;
+  private final TransactionTemplate own;
+  private final Clock clock;
+
+  public JdbcAuthorizationHolds(
+      JdbcTemplate jdbc, PlatformTransactionManager transactions, Clock clock) {
+    this.jdbc = jdbc;
+    this.own = new TransactionTemplate(transactions);
+    this.own.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+    this.clock = clock;
+    jdbc.execute(
+        "create table if not exists processor_hold ("
+            + "authorization_code varchar(64) primary key, "
+            + "order_id varchar(36) not null, "
+            + "amount numeric(12,2) not null, "
+            + "state varchar(16) not null, "
+            + "granted_at timestamp with time zone not null, "
+            + "released_at timestamp with time zone)");
+    jdbc.execute("create index if not exists ix_processor_hold_order on processor_hold (order_id)");
+  }
+
+  @Override
+  public void grant(String orderId, String authorizationCode, BigDecimal amount) {
+    if (reopen(orderId, authorizationCode, amount) > 0) {
+      return;
+    }
+    try {
+      own.executeWithoutResult(
+          status ->
+              jdbc.update(
+                  "insert into processor_hold"
+                      + " (authorization_code, order_id, amount, state, granted_at)"
+                      + " values (?, ?, ?, ?, ?)",
+                  authorizationCode,
+                  orderId,
+                  amount,
+                  OUTSTANDING,
+                  Timestamp.from(clock.instant())));
+    } catch (DuplicateKeyException raced) {
+      // another grant of the same code inserted it first; make sure it stands as outstanding
+      reopen(orderId, authorizationCode, amount);
+    }
+  }
+
+  /** Marks an existing hold with this code outstanding again; returns how many rows it touched. */
+  private int reopen(String orderId, String authorizationCode, BigDecimal amount) {
+    Integer updated =
+        own.execute(
+            status ->
+                jdbc.update(
+                    "update processor_hold set order_id = ?, amount = ?, state = ?, granted_at = ?,"
+                        + " released_at = null where authorization_code = ?",
+                    orderId,
+                    amount,
+                    OUTSTANDING,
+                    Timestamp.from(clock.instant()),
+                    authorizationCode));
+    return updated == null ? 0 : updated;
+  }
+
+  @Override
+  public int release(String orderId) {
+    Integer released =
+        own.execute(
+            status ->
+                jdbc.update(
+                    "update processor_hold set state = ?, released_at = ?"
+                        + " where order_id = ? and state = ?",
+                    RELEASED,
+                    Timestamp.from(clock.instant()),
+                    orderId,
+                    OUTSTANDING));
+    return released == null ? 0 : released;
+  }
+
+  @Override
+  public int outstanding(String orderId) {
+    Integer count =
+        jdbc.queryForObject(
+            "select count(*) from processor_hold where order_id = ? and state = ?",
+            Integer.class,
+            orderId,
+            OUTSTANDING);
+    return count == null ? 0 : count;
+  }
+}
