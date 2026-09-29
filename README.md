@@ -192,7 +192,7 @@ the stack down on every exit path unless `CHAOS_KEEP_STACK=1`.
 
 ```bash
 make lint     # spotless (google-java-format)
-make test     # mvn verify: 94 unit tests + 16 integration tests
+make test     # mvn verify: 95 unit tests + 16 integration tests
 ```
 
 Unit tests (H2, no Docker): saga state machine transitions and compensation, deadline reaper

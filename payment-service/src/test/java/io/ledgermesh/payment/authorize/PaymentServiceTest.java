@@ -290,6 +290,59 @@ class PaymentServiceTest {
     }
   }
 
+  @Test
+  void aReservationThatRecordsWhileAReDriveIsAtTheProcessorFailsSoThePaymentIsAuthorizedOnce()
+      throws Exception {
+    CountDownLatch lookedUp = new CountDownLatch(1);
+    CountDownLatch atProcessor = new CountDownLatch(1);
+    when(processor.authorize(anyString(), anyString(), any(), anyInt()))
+        .thenAnswer(
+            call -> {
+              if (atProcessor.getCount() > 0) {
+                // the re-drive's payment is not committed yet; the held reservation saves now
+                atProcessor.countDown();
+                TimeUnit.MILLISECONDS.sleep(300);
+              }
+              return new Approved("AUTH-12");
+            });
+    PaymentEventListener late = listenerHeldAfterLookup("o12", lookedUp, atProcessor);
+    ConsumerRecord<String, String> reservation =
+        consumed(
+            new InventoryReserved(
+                "evt-o12",
+                "o12",
+                "c-late",
+                Instant.now(),
+                "cust-late",
+                List.of(new OrderLine("SKU", 1)),
+                new BigDecimal("99.00")));
+    ExecutorService pool = Executors.newFixedThreadPool(2);
+    try {
+      // the reservation found no payment for the order and is held until a re-drive, which
+      // records and attempts its payment in one transaction, is calling the processor
+      Future<?> first = pool.submit(() -> late.onInventoryReserved(reservation));
+      assertThat(lookedUp.await(10, TimeUnit.SECONDS)).isTrue();
+      Future<?> redrive =
+          pool.submit(() -> listener.onPaymentRequested(consumed(requested("o12"))));
+
+      assertThatThrownBy(() -> first.get(10, TimeUnit.SECONDS))
+          .hasCauseInstanceOf(DataIntegrityViolationException.class);
+      redrive.get(10, TimeUnit.SECONDS);
+
+      // delivered again, the reservation finds the payment the re-drive authorized
+      listener.onInventoryReserved(reservation);
+      Payment stored = payments.findById("o12").orElseThrow();
+      assertThat(stored.getStatus()).isEqualTo(PaymentStatus.AUTHORIZED);
+      assertThat(stored.getCustomerId()).isEqualTo("cust");
+      verify(processor, times(1)).authorize(anyString(), anyString(), any(), anyInt());
+      assertThat(outbox.findAll())
+          .extracting(OutboxEvent::getTopic)
+          .containsExactly(Topics.PAYMENT_COMPLETED);
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
   /**
    * A listener whose first lookup of the order's payment returns what it found and then waits for
    * {@code release}, which puts another creator's commit between that lookup and the save.
