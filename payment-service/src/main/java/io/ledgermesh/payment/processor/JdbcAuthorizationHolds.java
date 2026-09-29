@@ -3,6 +3,7 @@ package io.ledgermesh.payment.processor;
 import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.Clock;
+import java.util.List;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
@@ -70,6 +71,37 @@ public class JdbcAuthorizationHolds implements AuthorizationHolds {
                     OUTSTANDING,
                     keep == null ? "" : keep));
     return released == null ? 0 : released;
+  }
+
+  @Override
+  public boolean releaseCode(String orderId, String authorizationCode) {
+    Integer released =
+        own.execute(
+            status ->
+                jdbc.update(
+                    "update processor_hold set state = ?, released_at = ?"
+                        + " where authorization_code = ? and order_id = ? and state = ?",
+                    RELEASED,
+                    Timestamp.from(clock.instant()),
+                    authorizationCode,
+                    orderId,
+                    OUTSTANDING));
+    return released != null && released > 0;
+  }
+
+  @Override
+  public List<PaymentProcessor.Authorization> outstanding(int limit) {
+    return jdbc.query(
+        "select order_id, authorization_code, amount, granted_at from processor_hold"
+            + " where state = ? order by granted_at, authorization_code limit ?",
+        (rs, row) ->
+            new PaymentProcessor.Authorization(
+                rs.getString("order_id"),
+                rs.getString("authorization_code"),
+                rs.getBigDecimal("amount"),
+                rs.getTimestamp("granted_at").toInstant()),
+        OUTSTANDING,
+        limit);
   }
 
   @Override

@@ -57,6 +57,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 public class PaymentService {
 
   private static final Logger log = LoggerFactory.getLogger(PaymentService.class);
+  private static final List<PaymentStatus> SETTLED =
+      List.of(PaymentStatus.AUTHORIZED, PaymentStatus.DECLINED, PaymentStatus.VOIDED);
 
   private final PaymentRepository payments;
   private final PaymentAuthorizer authorizer;
@@ -204,7 +206,8 @@ public class PaymentService {
    */
   public boolean releaseHold(String orderId) {
     Payment payment = payments.findById(orderId).orElse(null);
-    if (payment == null || payment.getReleaseDueAt() == null) {
+    if (payment == null || payment.getReleaseDueAt() == null || payment.getStatus().isOpen()) {
+      // an open payment has not decided what it keeps, so nothing is released for it here
       return false;
     }
     int released;
@@ -234,7 +237,8 @@ public class PaymentService {
   public int sweepReleases() {
     int recorded = 0;
     for (Payment payment :
-        payments.findTop100ByReleaseDueAtLessThanEqualOrderByReleaseDueAtAsc(clock.instant())) {
+        payments.findTop100ByReleaseDueAtLessThanEqualAndStatusInOrderByReleaseDueAtAsc(
+            clock.instant(), SETTLED)) {
       if (releaseHold(payment.getOrderId())) {
         recorded++;
       }
@@ -244,10 +248,10 @@ public class PaymentService {
 
   /**
    * An answer the processor gave after its time limit. It is committed like any other, and tried
-   * again when a concurrent write to the payment won the version. If it still cannot be committed,
-   * a release is made due on the payment without regard to its version: an approval that is not
-   * committed must not stay on the card, and one the payment should have kept is kept by the next
-   * attempt, whose authorization makes a release of the others due in turn.
+   * again a few times when a concurrent write to the payment won the version, which gets an
+   * approval the payment does not keep released at the next sweep. An answer that still does not
+   * commit is left to {@link HoldReconciler}, which releases any authorization no payment keeps
+   * once it is past the grace period.
    */
   @EventListener
   public void onLateOutcome(LateOutcome late) {
@@ -259,14 +263,10 @@ public class PaymentService {
       } catch (OptimisticLockingFailureException e) {
         sleepQuietly(20L * tries);
       } catch (RuntimeException e) {
-        log.warn("late answer for order {} not committed: {}", late.orderId(), e.toString());
         break;
       }
     }
-    if (late.outcome() instanceof AuthorizationOutcome.Authorized) {
-      payments.releaseOwed(late.orderId(), clock.instant());
-      log.warn("late approval for order {} not committed, release made due", late.orderId());
-    }
+    log.warn("late answer for order {} not committed, left to the reconciler", late.orderId());
   }
 
   private static void sleepQuietly(long millis) {

@@ -4,7 +4,9 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Duration;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -69,6 +71,22 @@ public class SyntheticProcessor implements PaymentProcessor {
   @Override
   public int release(String orderId, String keep) {
     return holds.release(orderId, keep);
+  }
+
+  @Override
+  public boolean releaseAuthorization(String orderId, String authorizationCode) {
+    return holds.releaseCode(orderId, authorizationCode);
+  }
+
+  @Override
+  public List<Authorization> outstanding(int limit) {
+    return holds.outstanding(limit);
+  }
+
+  /** A call answers at once or after the slow path's {@code slow-millis}; nothing takes longer. */
+  @Override
+  public Duration longestCall() {
+    return Duration.ofMillis(slowMillis);
   }
 
   static int bucket(String input) {

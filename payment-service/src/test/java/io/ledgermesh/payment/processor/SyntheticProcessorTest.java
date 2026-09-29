@@ -7,6 +7,7 @@ import io.ledgermesh.payment.processor.PaymentProcessor.Approved;
 import io.ledgermesh.payment.processor.PaymentProcessor.Declined;
 import java.math.BigDecimal;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
@@ -132,6 +133,27 @@ class SyntheticProcessorTest {
         }
       }
       return released;
+    }
+
+    @Override
+    public boolean releaseCode(String orderId, String authorizationCode) {
+      if (orderId.equals(codes.get(authorizationCode)) && open.get(authorizationCode)) {
+        open.put(authorizationCode, false);
+        return true;
+      }
+      return false;
+    }
+
+    @Override
+    public List<PaymentProcessor.Authorization> outstanding(int limit) {
+      return codes.entrySet().stream()
+          .filter(h -> open.get(h.getKey()))
+          .map(
+              h ->
+                  new PaymentProcessor.Authorization(
+                      h.getValue(), h.getKey(), BigDecimal.ONE, null))
+          .limit(limit)
+          .toList();
     }
 
     @Override

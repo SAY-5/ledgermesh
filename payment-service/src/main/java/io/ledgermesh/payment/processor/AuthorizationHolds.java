@@ -1,6 +1,7 @@
 package io.ledgermesh.payment.processor;
 
 import java.math.BigDecimal;
+import java.util.List;
 
 /**
  * The authorizations the synthetic processor has granted and not yet released: the stand-in for a
@@ -17,6 +18,12 @@ public interface AuthorizationHolds {
    */
   int release(String orderId, String keep);
 
+  /** Releases one authorization by its code; returns whether it was outstanding. */
+  boolean releaseCode(String orderId, String authorizationCode);
+
   /** How many authorizations of the order are outstanding. */
   int outstanding(String orderId);
+
+  /** Every outstanding authorization, oldest first, at most {@code limit}. */
+  List<PaymentProcessor.Authorization> outstanding(int limit);
 }
