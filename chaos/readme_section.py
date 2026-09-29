@@ -318,8 +318,11 @@ The last seven lines are the `/ops/overview` of each service read after the back
 
 What a run guarantees, and what the harness checks: every submitted order reaches CONFIRMED or
 CANCELLED; a confirmed order is paid once, for its amount, and holds exactly the stock it asked
-for; a cancelled order is charged nothing and holds nothing; nothing is paid or held for an order
-that was never submitted, and the stock rows agree with the holds. An order may be cancelled for
+for; a cancelled order is charged nothing and holds nothing, and one cancelled for anything but
+stock has had its cancellation answered by both inventory and payment (a released hold or marker,
+a voided or declined payment), so no late reservation can still take stock or money for it;
+nothing is paid or held for an order that was never submitted, and the stock rows agree with the
+holds. An order may be cancelled for
 stock or because its saga outlived a deadline, and for nothing else. A deadline runs on the wall
 clock, the order service's own absences included, so a seed that kills the order service more
 than once can use up the {RESERVATION_TIMEOUT} s reservation window of an order placed just before

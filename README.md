@@ -140,20 +140,23 @@ each kill because a killed JVM loses its in-memory meters. The last seven lines 
 
 What a run guarantees, and what the harness checks: every submitted order reaches CONFIRMED or
 CANCELLED; a confirmed order is paid once, for its amount, and holds exactly the stock it asked for;
-a cancelled order is charged nothing and holds nothing; nothing is paid or held for an order that
-was never submitted, and the stock rows agree with the holds. An order may be cancelled for stock or
-because its saga outlived a deadline, and for nothing else. A deadline runs on the wall clock, the
-order service's own absences included, so a seed that kills the order service more than once can use
-up the 60 s reservation window of an order placed just before the first kill; on the restart the
-reaper cancels it before the listener reads the reservation and the payment waiting for it. Such an
-order is compensated like any cancellation, its stock released and its payment voided, and a summary
-the harness writes now counts it under `cancelled (deadline)` with its reason instead of under
-`failed / stuck`. Before teardown the harness reads every order, its timeline, its payment and its
-stock holds from the three databases into `chaos/out/final.json`, waiting up to
-`CHAOS_DRAIN_TIMEOUT` for compensations still on their way; the `ledger` line fails the run on any
-money or stock rule broken, and `orders to read` lists every order that was not confirmed or
-cancelled for stock with its payment, holds and timeline. The four runs above were recorded before
-the harness wrote those lines, and each confirmed or cancelled for stock every order it took.
+a cancelled order is charged nothing and holds nothing, and one cancelled for anything but stock has
+had its cancellation answered by both inventory and payment (a released hold or marker, a voided or
+declined payment), so no late reservation can still take stock or money for it; nothing is paid or
+held for an order that was never submitted, and the stock rows agree with the holds. An order may be
+cancelled for stock or because its saga outlived a deadline, and for nothing else. A deadline runs
+on the wall clock, the order service's own absences included, so a seed that kills the order service
+more than once can use up the 60 s reservation window of an order placed just before the first kill;
+on the restart the reaper cancels it before the listener reads the reservation and the payment
+waiting for it. Such an order is compensated like any cancellation, its stock released and its
+payment voided, and a summary the harness writes now counts it under `cancelled (deadline)` with its
+reason instead of under `failed / stuck`. Before teardown the harness reads every order, its
+timeline, its payment and its stock holds from the three databases into `chaos/out/final.json`,
+waiting up to `CHAOS_DRAIN_TIMEOUT` for compensations still on their way; the `ledger` line fails
+the run on any money or stock rule broken, and `orders to read` lists every order that was not
+confirmed or cancelled for stock with its payment, holds and timeline. The four runs above were
+recorded before the harness wrote those lines, and each confirmed or cancelled for stock every order
+it took.
 
 The seed fixes the load, and, under one bash, the kill schedule the harness draws from it. Replaying
 the draw sequence of [chaos/loadgen.py](chaos/loadgen.py) at seed 3 for the 1200 orders of this

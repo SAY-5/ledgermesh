@@ -273,8 +273,11 @@ def audit(final):
     """Checks the ledger against the money and stock rules. A confirmed order holds one authorized
     payment for its amount and exactly the stock it asked for. Any other order holds no authorized
     payment, no open one either once it is cancelled (an open payment can still be authorized),
-    and no stock. The stock rows agree with the holds, and nothing is held or paid for an order
-    that was never submitted. Returns (order or sku, problem) pairs."""
+    and no stock. An order cancelled for anything but stock sent order.cancelled, and both of its
+    readers must have answered it: the payment voided or declined, and a released row or marker in
+    the inventory ledger, since until then a late reservation could still take stock or money. The
+    stock rows agree with the holds, and nothing is held or paid for an order that was never
+    submitted. Returns (order or sku, problem) pairs."""
     problems = []
     reserved = {}
 
@@ -305,12 +308,18 @@ def audit(final):
                 problems.append((rec["id"], f"confirmed holding {held or 'nothing'} for {wanted}"))
             continue
         outcome = " ".join(x for x in (o["status"], o["reason"]) if x)
+        compensated = o["status"] == "CANCELLED" and o["reason"] != "OUT_OF_STOCK"
         if paid == "AUTHORIZED":
             problems.append((rec["id"], f"{outcome} but charged {pay['amount']}"))
         elif paid in ("NEW", "DEFERRED") and o["status"] == "CANCELLED":
             problems.append((rec["id"], f"{outcome} with its payment still {paid}"))
+        elif compensated and paid not in ("VOIDED", "DECLINED"):
+            problems.append((rec["id"], f"{outcome} but the payment service never voided it "
+                                        f"(payment {paid})"))
         if held and o["status"] == "CANCELLED":
             problems.append((rec["id"], f"{outcome} still holding {held}"))
+        elif compensated and not rec["holds"]:
+            problems.append((rec["id"], f"{outcome} but inventory never released it"))
     for oid, hs in final["strays"]["holds"].items():
         if holding(hs):
             problems.append((oid, "stock held for an order never submitted"))
