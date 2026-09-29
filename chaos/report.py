@@ -224,14 +224,16 @@ def ledger(orders_path, out_path, settle=None):
     first that keeps every rule, or the last read once `settle` seconds pass without the number
     of broken rules falling (or four times that in all).
 
-    Before the first read it waits out the longest processor call that can still be running: a
-    call the time limiter cut off runs on and can be approved up to the synthetic processor's
-    slow-millis after it started, and that approval is released by the payment service's next
-    sweep. Reading earlier could pass a ledger that such an approval is about to break."""
+    Before the first read it waits the payment service's reconciliation grace period plus one
+    interval: an authorization no payment keeps, such as an approval whose commit was lost, is
+    released only once it is older than the grace period, by the next reconciliation after that.
+    Reading earlier could pass a ledger that such an authorization is about to break, or fail one
+    the reconciler is about to repair."""
     with open(orders_path) as fh:
         submitted = json.load(fh)["submitted"]
     inflight = inflight_wait()
-    print(f"ledger: waiting {inflight:.0f}s for processor calls still in flight", flush=True)
+    print(f"ledger: waiting {inflight:.0f}s, the reconciliation grace period and one interval",
+          flush=True)
     time.sleep(inflight)
     started = last_progress = time.time()
     fewest = None
@@ -252,14 +254,50 @@ def ledger(orders_path, out_path, settle=None):
 
 
 def inflight_wait():
-    """Seconds to wait before reading the ledger: the synthetic processor's slow-millis, read from
-    the payment service's configuration, plus 2 s of margin and one 1 s sweep of the releases.
-    CHAOS_INFLIGHT_WAIT overrides it."""
+    """Seconds to wait before reading the ledger: the payment service's reconciliation grace period
+    plus one reconciliation interval plus 2 s, so that every authorization no payment keeps has
+    been past the grace period for a whole interval and a reconciliation has run over it. The two
+    figures are the payment service's own gauges, which it derives from its configuration; if they
+    cannot be read, the same derivation is made from its application.yml. CHAOS_INFLIGHT_WAIT
+    overrides it."""
     if os.environ.get("CHAOS_INFLIGHT_WAIT"):
         return float(os.environ["CHAOS_INFLIGHT_WAIT"])
+    gauges = {}
+    try:
+        for line in fetch(f"{SERVICES['payment-service']}/actuator/prometheus").splitlines():
+            m = LINE.match(line)
+            if m and m.group(1) in ("ledgermesh_payments_reconcile_grace_seconds",
+                                    "ledgermesh_payments_reconcile_interval_seconds"):
+                gauges[m.group(1)] = float(m.group(3))
+    except Exception:  # noqa: BLE001
+        pass
+    grace = gauges.get("ledgermesh_payments_reconcile_grace_seconds")
+    interval = gauges.get("ledgermesh_payments_reconcile_interval_seconds")
+    if grace is None or interval is None:
+        grace, interval = configured_reconciliation()
+    return grace + interval + 2.0
+
+
+def configured_reconciliation():
+    """The grace period and interval as the payment service derives them: the longest of its time
+    limits and the synthetic processor's slow-millis, plus the commit allowance; and reconcile-ms."""
     yml = open("payment-service/src/main/resources/application.yml").read()
-    slow = re.search(r"slow-millis:\s*\$?\{?[A-Z_]*:?(\d+)", yml)
-    return (int(slow.group(1)) if slow else 3000) / 1000.0 + 3.0
+
+    def seconds(value):
+        value = value.strip()
+        if value.endswith("ms"):
+            return float(value[:-2]) / 1000
+        if value.endswith("s"):
+            return float(value[:-1])
+        return float(value) / 1000
+
+    limits = [seconds(v) for v in re.findall(r"timeout-duration:\s*(\S+)", yml)]
+    slow = re.search(r"slow-millis:\s*(\d+)", yml)
+    call = max(limits + ([int(slow.group(1)) / 1000] if slow else []) or [5.0])
+    allowance = re.search(r"commit-allowance:\s*(\S+)", yml)
+    interval = re.search(r"reconcile-ms:\s*(\d+)", yml)
+    return (call + (seconds(allowance.group(1)) if allowance else 5.0),
+            int(interval.group(1)) / 1000 if interval else 5.0)
 
 
 def read_ledger(submitted):
