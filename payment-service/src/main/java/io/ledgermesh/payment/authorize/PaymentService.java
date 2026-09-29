@@ -5,10 +5,12 @@ import io.ledgermesh.common.events.OrderCancelled;
 import io.ledgermesh.common.events.PaymentCompleted;
 import io.ledgermesh.common.events.PaymentFailed;
 import io.ledgermesh.common.events.PaymentRequested;
+import io.ledgermesh.common.events.PaymentVoided;
 import io.ledgermesh.common.outbox.OutboxWriter;
 import io.ledgermesh.payment.domain.Payment;
 import io.ledgermesh.payment.domain.PaymentRepository;
 import io.ledgermesh.payment.domain.PaymentStatus;
+import io.ledgermesh.payment.processor.PaymentProcessor;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
 import java.time.Duration;
@@ -39,7 +41,11 @@ import org.springframework.transaction.support.TransactionTemplate;
  *
  * <p>{@link #cancel}, fed by {@code order.cancelled}, voids the payment of an order that will never
  * be fulfilled, or inserts a voided marker when it comes before both creators, the same way, so a
- * race with a creator ends with one of the two delivered again onto the other's row.
+ * race with a creator ends with one of the two delivered again onto the other's row. It answers
+ * every cancellation with {@code payment.voided}, which is how the order service knows the payment
+ * side of the compensation is done. A void that may leave money held on the card makes a release at
+ * the processor due; {@link #releaseHold} asks for it right away and {@link #sweepReleases} again
+ * until the processor confirms, and an approval that lands after the void makes it due again.
  */
 @Service
 public class PaymentService {
@@ -48,6 +54,7 @@ public class PaymentService {
 
   private final PaymentRepository payments;
   private final PaymentAuthorizer authorizer;
+  private final PaymentProcessor processor;
   private final OutboxWriter outbox;
   private final TransactionTemplate tx;
   private final Clock clock;
@@ -58,6 +65,7 @@ public class PaymentService {
   public PaymentService(
       PaymentRepository payments,
       PaymentAuthorizer authorizer,
+      PaymentProcessor processor,
       OutboxWriter outbox,
       TransactionTemplate tx,
       Clock clock,
@@ -66,6 +74,7 @@ public class PaymentService {
       @Value("${ledgermesh.payment.retry-delay:2s}") Duration retryDelay) {
     this.payments = payments;
     this.authorizer = authorizer;
+    this.processor = processor;
     this.outbox = outbox;
     this.tx = tx;
     this.clock = clock;
@@ -79,6 +88,8 @@ public class PaymentService {
           payments,
           r -> r.countByStatus(status));
     }
+    meters.gauge(
+        "ledgermesh.payments.releases.due", payments, r -> r.countByReleaseDueAtIsNotNull());
   }
 
   @Transactional
@@ -143,30 +154,81 @@ public class PaymentService {
    * order has become since, so a cancellation can find its payment authorized (the order passed its
    * deadline while the answers waited for the order service to read them), open (the processor was
    * away), or not on file yet (the reservation has not reached this service). An authorized or open
-   * payment is voided and a missing one is replaced by a voided marker, so neither a late
-   * reservation nor a re-drive charges for the order; a declined or voided payment stays as it is.
-   * An authorization that lands after the void finds the payment settled and is dropped.
+   * payment is voided, with a release at the processor due, and a missing one is replaced by a
+   * voided marker, so neither a late reservation nor a re-drive charges for the order; a declined
+   * or voided payment stays as it is. Whatever it found, the cancellation is answered with {@code
+   * payment.voided} in the same transaction, so the order service can stop sending it. The release
+   * itself is asked for by {@link #releaseHold}, after this commits.
    */
   @Transactional
   public PaymentStatus cancel(OrderCancelled event) {
     Instant now = clock.instant();
     Payment payment = payments.findById(event.orderId()).orElse(null);
     String before = payment == null ? "NONE" : payment.getStatus().name();
+    PaymentStatus after = PaymentStatus.VOIDED;
     if (payment == null) {
       payments.saveAndFlush(
           Payment.voidedMarker(event.orderId(), event.correlationId(), event.reason(), now));
     } else if (payment.getStatus() == PaymentStatus.AUTHORIZED || payment.getStatus().isOpen()) {
       payment.voided(event.reason(), now);
     } else {
-      return payment.getStatus();
+      after = payment.getStatus();
     }
-    meters.counter("ledgermesh.payments.voided", "was", before).increment();
-    log.info(
-        "payment for order {} voided, it was {} (order {})",
-        event.orderId(),
-        before,
-        event.reason());
-    return PaymentStatus.VOIDED;
+    outbox.append(
+        new PaymentVoided(
+            UUID.randomUUID().toString(), event.orderId(), event.correlationId(), now, before));
+    if (after == PaymentStatus.VOIDED && !"VOIDED".equals(before)) {
+      meters.counter("ledgermesh.payments.voided", "was", before).increment();
+      log.info(
+          "payment for order {} voided, it was {} (order {})",
+          event.orderId(),
+          before,
+          event.reason());
+    }
+    return after;
+  }
+
+  /**
+   * Asks the processor to release what it holds for a voided payment's order, when a release is
+   * due. Runs outside any transaction, and records the release only on the version of the row it
+   * read, so an approval that landed meanwhile leaves the release due for the next sweep. A
+   * processor that cannot be reached leaves it due as well. Returns whether the release was
+   * recorded.
+   */
+  public boolean releaseHold(String orderId) {
+    Payment payment = payments.findById(orderId).orElse(null);
+    if (payment == null || payment.getReleaseDueAt() == null) {
+      return false;
+    }
+    int released;
+    try {
+      released = processor.release(orderId);
+    } catch (RuntimeException e) {
+      meters.counter("ledgermesh.payments.releases", "result", "failed").increment();
+      log.warn("release for order {} failed, left due: {}", orderId, e.toString());
+      return false;
+    }
+    if (payments.released(orderId, payment.getVersion(), clock.instant()) == 0) {
+      meters.counter("ledgermesh.payments.releases", "result", "superseded").increment();
+      return false;
+    }
+    meters
+        .counter("ledgermesh.payments.releases", "result", released > 0 ? "released" : "nothing")
+        .increment();
+    log.info("processor released {} authorization(s) for order {}", released, orderId);
+    return true;
+  }
+
+  /** Asks for every release that is due. Returns how many were recorded. */
+  public int sweepReleases() {
+    int recorded = 0;
+    for (Payment payment :
+        payments.findTop100ByReleaseDueAtLessThanEqualOrderByReleaseDueAtAsc(clock.instant())) {
+      if (releaseHold(payment.getOrderId())) {
+        recorded++;
+      }
+    }
+    return recorded;
   }
 
   private void reemit(Payment payment) {
@@ -205,7 +267,11 @@ public class PaymentService {
             ? authorizer.authorizeDeferred(
                 orderId, payment.getCustomerId(), payment.getAmount(), payment.getAttempts())
             : authorizer.authorize(orderId, payment.getCustomerId(), payment.getAmount());
-    return Optional.of(commit(orderId, outcome));
+    PaymentStatus status = commit(orderId, outcome);
+    if (status == PaymentStatus.VOIDED && outcome instanceof AuthorizationOutcome.Authorized) {
+      releaseHold(orderId);
+    }
+    return Optional.of(status);
   }
 
   /** Persists the outcome and its event in one transaction. Safe to call from any thread. */
@@ -215,6 +281,14 @@ public class PaymentService {
 
   private PaymentStatus applyOutcome(String orderId, AuthorizationOutcome outcome) {
     Payment payment = payments.findById(orderId).orElseThrow();
+    if (payment.getStatus() == PaymentStatus.VOIDED
+        && outcome instanceof AuthorizationOutcome.Authorized) {
+      // the processor approved an attempt that started before the void: that hold goes back too
+      payment.approvedAfterVoid(clock.instant());
+      meters.counter("ledgermesh.payments.approvals_after_void").increment();
+      log.warn("payment for order {} approved after its void, release due again", orderId);
+      return PaymentStatus.VOIDED;
+    }
     if (!payment.getStatus().isOpen()) {
       return payment.getStatus();
     }

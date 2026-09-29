@@ -53,6 +53,17 @@ public class Payment {
   private Instant updatedAt;
 
   /**
+   * Set while the processor may still hold an authorization for a voided payment and has not
+   * confirmed its release: from the void, and again when an approval lands after it. Cleared only
+   * by a release that started from the version of the row it clears, so an approval that lands
+   * during a release leaves the next one due.
+   */
+  private Instant releaseDueAt;
+
+  /** When the processor last confirmed it holds nothing for this payment's order. */
+  private Instant releasedAt;
+
+  /**
    * Null until the payment is inserted, which is how the repository tells a new payment from a
    * stored one: the id is the order id, assigned rather than generated. A primitive version would
    * make it merge a new payment, and a merge reads the row first, so a creator that saves after
@@ -84,12 +95,14 @@ public class Payment {
 
   /**
    * The trace a cancellation leaves when no payment was on file for the order: voided, for nothing,
-   * never attempted. Whichever creator comes later finds it and leaves the order uncharged.
+   * never attempted, so there is nothing at the processor to release. Whichever creator comes later
+   * finds it and leaves the order uncharged.
    */
   public static Payment voidedMarker(
       String orderId, String correlationId, String reason, Instant now) {
     Payment marker = new Payment(orderId, "", BigDecimal.ZERO, correlationId, now, null);
     marker.voided(reason, now);
+    marker.releaseDueAt = null;
     return marker;
   }
 
@@ -114,12 +127,23 @@ public class Payment {
     this.updatedAt = now;
   }
 
-  /** Gives the payment up for a cancelled order; an authorization code stays as the record. */
+  /**
+   * Gives the payment up for a cancelled order and makes a release at the processor due: an
+   * authorized payment holds money on the card, and an open one may have been approved by an
+   * attempt whose answer never made it here. An authorization code stays as the record.
+   */
   public void voided(String reason, Instant now) {
     this.status = PaymentStatus.VOIDED;
     this.reason = reason;
     this.nextAttemptAt = null;
     this.updatedAt = now;
+    this.releaseDueAt = now;
+  }
+
+  /** An approval landed after the void: the processor holds money again, release it again. */
+  public void approvedAfterVoid(Instant now) {
+    this.updatedAt = now;
+    this.releaseDueAt = now;
   }
 
   public void attempted() {
@@ -164,5 +188,17 @@ public class Payment {
 
   public Instant getCreatedAt() {
     return createdAt;
+  }
+
+  public Instant getReleaseDueAt() {
+    return releaseDueAt;
+  }
+
+  public Instant getReleasedAt() {
+    return releasedAt;
+  }
+
+  public Long getVersion() {
+    return version;
   }
 }

@@ -15,7 +15,8 @@ import org.springframework.stereotype.Component;
 /**
  * Records the payment idempotently, then authorizes it. Re-drive requests from the order service
  * are answered with the outcome on file or a fresh attempt, and a cancelled order has its payment
- * voided, or blocked when it is not on file yet.
+ * voided, or blocked when it is not on file yet, is answered with {@code payment.voided}, and then
+ * has whatever the processor holds for it released.
  */
 @Component
 public class PaymentEventListener {
@@ -67,6 +68,7 @@ public class PaymentEventListener {
     CorrelationId.bind(CorrelationId.fromHeaders(record.headers(), event.correlationId()));
     try {
       idempotent.once(CONSUMER, event.eventId(), () -> payments.cancel(event));
+      payments.releaseHold(event.orderId());
     } finally {
       CorrelationId.clear();
     }

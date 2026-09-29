@@ -52,6 +52,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -291,9 +292,10 @@ class PaymentServiceTest {
   }
 
   @Test
-  void aCancelledOrderHasItsAuthorizedPaymentVoided() {
+  void aCancelledOrderHasItsAuthorizedPaymentVoidedAndReleasedOnce() {
     when(processor.authorize(anyString(), anyString(), any(), anyInt()))
         .thenReturn(new Approved("AUTH-20"));
+    when(processor.release("o20")).thenReturn(1);
     listener.onInventoryReserved(consumed(reserved("o20")));
     assertThat(payments.findById("o20").orElseThrow().getStatus())
         .isEqualTo(PaymentStatus.AUTHORIZED);
@@ -306,9 +308,11 @@ class PaymentServiceTest {
     assertThat(voided.getStatus()).isEqualTo(PaymentStatus.VOIDED);
     assertThat(voided.getReason()).isEqualTo("RESERVATION_TIMEOUT");
     assertThat(voided.getAuthorizationCode()).isEqualTo("AUTH-20");
-    assertThat(outbox.findAll())
-        .extracting(OutboxEvent::getTopic)
-        .containsExactly(Topics.PAYMENT_COMPLETED);
+    assertThat(voided.getReleaseDueAt()).isNull();
+    assertThat(voided.getReleasedAt()).isNotNull();
+    verify(processor, times(1)).release("o20");
+    assertThat(topics()).containsExactly(Topics.PAYMENT_COMPLETED, Topics.PAYMENT_VOIDED);
+    assertThat(outbox.findAll().get(1).getPayload()).contains("\"previous\":\"AUTHORIZED\"");
   }
 
   @Test
@@ -324,42 +328,73 @@ class PaymentServiceTest {
     assertThat(marker.getStatus()).isEqualTo(PaymentStatus.VOIDED);
     assertThat(marker.getAmount()).isEqualByComparingTo("0");
     assertThat(marker.getAttempts()).isZero();
+    assertThat(marker.getReleaseDueAt()).isNull();
     verify(processor, never()).authorize(anyString(), anyString(), any(), anyInt());
-    assertThat(outbox.count()).isZero();
+    verify(processor, never()).release(anyString());
+    assertThat(topics()).containsExactly(Topics.PAYMENT_VOIDED);
+    assertThat(outbox.findAll().get(0).getPayload()).contains("\"previous\":\"NONE\"");
   }
 
   @Test
-  void anOpenPaymentIsVoidedAndNeverAttemptedAgain() {
+  void anOpenPaymentIsVoidedNeverAttemptedAgainAndReleasedAtTheProcessor() {
     when(processor.authorize(anyString(), anyString(), any(), anyInt()))
         .thenThrow(new ProcessorUnavailableException("outage"));
     service.record(reserved("o22"), "c");
     assertThat(service.attempt("o22")).contains(PaymentStatus.DEFERRED);
 
+    reset(processor);
     listener.onOrderCancelled(consumed(cancelled("o22")));
 
-    reset(processor);
     assertThat(service.sweep()).isZero();
     assertThat(service.attempt("o22")).isEmpty();
     assertThat(payments.findById("o22").orElseThrow().getStatus()).isEqualTo(PaymentStatus.VOIDED);
     verify(processor, never()).authorize(anyString(), anyString(), any(), anyInt());
-    assertThat(outbox.count()).isZero();
+    // an attempt that timed out may still have been approved, so an open payment is released too
+    verify(processor, times(1)).release("o22");
+    assertThat(topics()).containsExactly(Topics.PAYMENT_VOIDED);
   }
 
   @Test
-  void anAuthorizationThatLandsAfterTheVoidIsDropped() {
-    service.record(reserved("o23"), "c");
-    listener.onOrderCancelled(consumed(cancelled("o23")));
+  void aReleaseTheProcessorCouldNotTakeStaysDueUntilTheSweepGetsItThrough() {
+    when(processor.release("o25"))
+        .thenThrow(new ProcessorUnavailableException("processor away"))
+        .thenReturn(1);
+    service.record(reserved("o25"), "c");
 
-    // the processor answered an attempt that read the payment before the cancel committed
-    assertThat(service.commit("o23", new AuthorizationOutcome.Authorized("AUTH-23")))
-        .isEqualTo(PaymentStatus.VOIDED);
+    listener.onOrderCancelled(consumed(cancelled("o25")));
+    assertThat(payments.findById("o25").orElseThrow().getReleaseDueAt()).isNotNull();
 
-    assertThat(payments.findById("o23").orElseThrow().getAuthorizationCode()).isNull();
-    assertThat(outbox.count()).isZero();
+    assertThat(service.sweepReleases()).isEqualTo(1);
+    assertThat(service.sweepReleases()).isZero();
+    assertThat(payments.findById("o25").orElseThrow().getReleaseDueAt()).isNull();
+    verify(processor, times(2)).release("o25");
   }
 
   @Test
-  void aDeclinedPaymentIsLeftAsItIsByTheCancel() {
+  void anApprovalThatLandsDuringAReleaseLeavesTheNextReleaseDue() {
+    service.record(reserved("o26"), "c");
+    when(processor.release("o26"))
+        .thenAnswer(
+            call -> {
+              // the processor approved an attempt that started before the void, while this
+              // release was on its way: the release read the row before that approval landed
+              service.commit("o26", new AuthorizationOutcome.Authorized("AUTH-26"));
+              return 0;
+            })
+        .thenReturn(1);
+
+    listener.onOrderCancelled(consumed(cancelled("o26")));
+
+    assertThat(payments.findById("o26").orElseThrow().getReleaseDueAt()).isNotNull();
+    assertThat(service.sweepReleases()).isEqualTo(1);
+    assertThat(payments.findById("o26").orElseThrow().getReleaseDueAt()).isNull();
+    assertThat(payments.findById("o26").orElseThrow().getStatus()).isEqualTo(PaymentStatus.VOIDED);
+    verify(processor, times(2)).release("o26");
+    assertThat(topics()).containsExactly(Topics.PAYMENT_VOIDED);
+  }
+
+  @Test
+  void aDeclinedPaymentIsLeftAsItIsButTheCancelIsStillAnswered() {
     when(processor.authorize(anyString(), anyString(), any(), anyInt()))
         .thenReturn(new Declined("CARD_DECLINED"));
     service.record(reserved("o24"), "c");
@@ -367,6 +402,162 @@ class PaymentServiceTest {
 
     assertThat(service.cancel(cancelled("o24"))).isEqualTo(PaymentStatus.DECLINED);
     assertThat(payments.findById("o24").orElseThrow().getReason()).isEqualTo("CARD_DECLINED");
+    assertThat(payments.findById("o24").orElseThrow().getReleaseDueAt()).isNull();
+    assertThat(topics()).containsExactly(Topics.PAYMENT_FAILED, Topics.PAYMENT_VOIDED);
+    assertThat(outbox.findAll().get(1).getPayload()).contains("\"previous\":\"DECLINED\"");
+  }
+
+  @Test
+  void aCancelSentAgainIsAnsweredAgainWithoutVoidingTwice() {
+    listener.onOrderCancelled(consumed(cancelled("o27")));
+    OrderCancelled again =
+        new OrderCancelled(
+            "cancel-again-o27",
+            "o27",
+            "c",
+            Instant.now(),
+            "RESERVATION_TIMEOUT",
+            List.of(new OrderLine("SKU", 1)));
+
+    listener.onOrderCancelled(consumed(again));
+
+    assertThat(topics()).containsExactly(Topics.PAYMENT_VOIDED, Topics.PAYMENT_VOIDED);
+    assertThat(outbox.findAll().get(1).getPayload()).contains("\"previous\":\"VOIDED\"");
+    assertThat(payments.findById("o27").orElseThrow().getStatus()).isEqualTo(PaymentStatus.VOIDED);
+  }
+
+  /**
+   * A cancellation that looked for the payment before the reservation recorded and authorized it
+   * inserts a marker on a key that is now taken, and fails; the redelivery the error handler makes
+   * voids the authorized payment and releases it.
+   */
+  @Test
+  void aCancelThatLosesTheInsertRaceToAReservationVoidsTheAuthorizedPaymentOnRedelivery()
+      throws Exception {
+    when(processor.authorize(anyString(), anyString(), any(), anyInt()))
+        .thenReturn(new Approved("AUTH-30"));
+    CountDownLatch lookedUp = new CountDownLatch(1);
+    CountDownLatch reserved = new CountDownLatch(1);
+    PaymentEventListener late = listenerHeldAfterLookup("o30", lookedUp, reserved);
+    ConsumerRecord<String, String> cancel = consumed(cancelled("o30"));
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    try {
+      Future<?> first = pool.submit(() -> late.onOrderCancelled(cancel));
+      assertThat(lookedUp.await(10, TimeUnit.SECONDS)).isTrue();
+      listener.onInventoryReserved(consumed(reserved("o30")));
+      assertThat(payments.findById("o30").orElseThrow().getStatus())
+          .isEqualTo(PaymentStatus.AUTHORIZED);
+      reserved.countDown();
+
+      assertThatThrownBy(() -> first.get(10, TimeUnit.SECONDS))
+          .hasCauseInstanceOf(DataIntegrityViolationException.class);
+      assertThat(topics()).containsExactly(Topics.PAYMENT_COMPLETED);
+
+      listener.onOrderCancelled(cancel);
+      Payment voided = payments.findById("o30").orElseThrow();
+      assertThat(voided.getStatus()).isEqualTo(PaymentStatus.VOIDED);
+      assertThat(voided.getAuthorizationCode()).isEqualTo("AUTH-30");
+      verify(processor, times(1)).release("o30");
+      assertThat(topics()).containsExactly(Topics.PAYMENT_COMPLETED, Topics.PAYMENT_VOIDED);
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  /**
+   * A reservation that looked for the payment before the cancellation inserted its marker fails on
+   * the key; its redelivery finds the marker and never calls the processor.
+   */
+  @Test
+  void aReservationThatLosesTheInsertRaceToTheMarkerNeverCallsTheProcessor() throws Exception {
+    when(processor.authorize(anyString(), anyString(), any(), anyInt()))
+        .thenReturn(new Approved("AUTH-31"));
+    CountDownLatch lookedUp = new CountDownLatch(1);
+    CountDownLatch marked = new CountDownLatch(1);
+    PaymentEventListener late = listenerHeldAfterLookup("o31", lookedUp, marked);
+    ConsumerRecord<String, String> reservation = consumed(reserved("o31"));
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    try {
+      Future<?> first = pool.submit(() -> late.onInventoryReserved(reservation));
+      assertThat(lookedUp.await(10, TimeUnit.SECONDS)).isTrue();
+      listener.onOrderCancelled(consumed(cancelled("o31")));
+      marked.countDown();
+
+      assertThatThrownBy(() -> first.get(10, TimeUnit.SECONDS))
+          .hasCauseInstanceOf(DataIntegrityViolationException.class);
+
+      listener.onInventoryReserved(reservation);
+      assertThat(payments.findById("o31").orElseThrow().getStatus())
+          .isEqualTo(PaymentStatus.VOIDED);
+      verify(processor, never()).authorize(anyString(), anyString(), any(), anyInt());
+      assertThat(topics()).containsExactly(Topics.PAYMENT_VOIDED);
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  /**
+   * An outcome whose commit read the payment before the void committed writes over a row that has
+   * moved on, fails on the version, and rolls back with its event: the payment stays voided.
+   */
+  @Test
+  void anOutcomeThatReadThePaymentBeforeTheVoidFailsOnTheVersionAndLeavesItVoided()
+      throws Exception {
+    service.record(reserved("o32"), "c");
+    CountDownLatch lookedUp = new CountDownLatch(1);
+    CountDownLatch voided = new CountDownLatch(1);
+    PaymentService held = serviceHeldAfterLookup("o32", lookedUp, voided);
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    try {
+      Future<PaymentStatus> outcome =
+          pool.submit(() -> held.commit("o32", new AuthorizationOutcome.Authorized("AUTH-32")));
+      assertThat(lookedUp.await(10, TimeUnit.SECONDS)).isTrue();
+      listener.onOrderCancelled(consumed(cancelled("o32")));
+      voided.countDown();
+
+      assertThatThrownBy(() -> outcome.get(10, TimeUnit.SECONDS))
+          .hasCauseInstanceOf(OptimisticLockingFailureException.class);
+      Payment stored = payments.findById("o32").orElseThrow();
+      assertThat(stored.getStatus()).isEqualTo(PaymentStatus.VOIDED);
+      assertThat(stored.getAuthorizationCode()).isNull();
+      verify(processor, times(1)).release("o32");
+      assertThat(topics()).containsExactly(Topics.PAYMENT_VOIDED);
+    } finally {
+      pool.shutdownNow();
+    }
+  }
+
+  /**
+   * An attempt that read the payment open before the void calls the processor after it: the
+   * approval is dropped from the ledger and what the processor granted is released again.
+   */
+  @Test
+  void theProcessorCalledAfterTheVoidHasItsApprovalDroppedAndReleased() throws Exception {
+    when(processor.authorize(anyString(), anyString(), any(), anyInt()))
+        .thenReturn(new Approved("AUTH-33"));
+    service.record(reserved("o33"), "c");
+    CountDownLatch lookedUp = new CountDownLatch(1);
+    CountDownLatch voided = new CountDownLatch(1);
+    PaymentService held = serviceHeldAfterLookup("o33", lookedUp, voided);
+    ExecutorService pool = Executors.newSingleThreadExecutor();
+    try {
+      Future<Optional<PaymentStatus>> attempt = pool.submit(() -> held.attempt("o33"));
+      assertThat(lookedUp.await(10, TimeUnit.SECONDS)).isTrue();
+      listener.onOrderCancelled(consumed(cancelled("o33")));
+      verify(processor, times(1)).release("o33");
+      voided.countDown();
+
+      assertThat(attempt.get(10, TimeUnit.SECONDS)).contains(PaymentStatus.VOIDED);
+      verify(processor, times(1)).authorize(anyString(), anyString(), any(), anyInt());
+      verify(processor, times(2)).release("o33");
+      Payment stored = payments.findById("o33").orElseThrow();
+      assertThat(stored.getStatus()).isEqualTo(PaymentStatus.VOIDED);
+      assertThat(stored.getAuthorizationCode()).isNull();
+      assertThat(stored.getReleaseDueAt()).isNull();
+      assertThat(topics()).containsExactly(Topics.PAYMENT_VOIDED);
+    } finally {
+      pool.shutdownNow();
+    }
   }
 
   /**
@@ -374,6 +565,13 @@ class PaymentServiceTest {
    * {@code release}, which puts another creator's commit between that lookup and the save.
    */
   private PaymentEventListener listenerHeldAfterLookup(
+      String orderId, CountDownLatch lookedUp, CountDownLatch release) {
+    return new PaymentEventListener(
+        codec, idempotent, serviceHeldAfterLookup(orderId, lookedUp, release));
+  }
+
+  /** A payment service whose lookups of the order's payment wait for {@code release}. */
+  private PaymentService serviceHeldAfterLookup(
       String orderId, CountDownLatch lookedUp, CountDownLatch release) {
     PaymentRepository held = mock(PaymentRepository.class, delegatesTo(payments));
     doAnswer(
@@ -385,17 +583,20 @@ class PaymentServiceTest {
             })
         .when(held)
         .findById(orderId);
-    PaymentService heldService =
-        new PaymentService(
-            held,
-            authorizer,
-            outboxWriter,
-            tx,
-            clock,
-            new SimpleMeterRegistry(),
-            Duration.ZERO,
-            Duration.ZERO);
-    return new PaymentEventListener(codec, idempotent, heldService);
+    return new PaymentService(
+        held,
+        authorizer,
+        processor,
+        outboxWriter,
+        tx,
+        clock,
+        new SimpleMeterRegistry(),
+        Duration.ZERO,
+        Duration.ZERO);
+  }
+
+  private List<String> topics() {
+    return outbox.findAll().stream().map(OutboxEvent::getTopic).toList();
   }
 
   private ConsumerRecord<String, String> consumed(DomainEvent event) {
