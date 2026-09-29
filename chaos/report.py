@@ -65,6 +65,7 @@ def scrape(service):
         if name in ("ledgermesh_breaker_transitions_total", "resilience4j_retry_calls_total",
                     "ledgermesh_payments_deferred_total", "ledgermesh_payments_voided_total",
                     "ledgermesh_payments_approvals_after_void_total",
+                    "ledgermesh_payments_releases_total",
                     "ledgermesh_saga_cancellations_resent_total",
                     "ledgermesh_consumer_duplicates_total",
                     "ledgermesh_outbox_published_total", "ledgermesh_inventory_releases_total",
@@ -347,7 +348,7 @@ def audit(final):
         elif compensated and not rec["holds"]:
             problems.append((rec["id"], f"{outcome} but inventory never released it"))
         on_card = [h for h in rec.get("card", []) if h["state"] == "OUTSTANDING"]
-        if on_card:
+        if on_card and o["status"] == "CANCELLED":
             problems.append((rec["id"], f"{outcome} but the processor still holds "
                                         f"{', '.join(h['amount'] for h in on_card)} on the card"))
         if compensated and not o.get("compensated_at"):
@@ -448,6 +449,7 @@ def summary(orders_path, snapshots_path, kills_path, final_path=None):
                "failed_without_retry": 0}
     deferred = voided = late_approvals = resent = duplicates = releases = release_noops = 0
     replayed = 0
+    card_releases = {}
     for service, counters in totals.items():
         for key, value in counters.items():
             name, _, labels = key.partition("{")
@@ -463,6 +465,9 @@ def summary(orders_path, snapshots_path, kills_path, final_path=None):
                 voided += int(value)
             elif name == "ledgermesh_payments_approvals_after_void_total":
                 late_approvals += int(value)
+            elif name == "ledgermesh_payments_releases_total":
+                result = label(labels, "result")
+                card_releases[result] = card_releases.get(result, 0) + int(value)
             elif name == "ledgermesh_saga_cancellations_resent_total":
                 resent += int(value)
             elif name == "ledgermesh_consumer_duplicates_total":
@@ -510,6 +515,9 @@ def summary(orders_path, snapshots_path, kills_path, final_path=None):
         f"  compensations        {releases} reservations released, {release_noops} releases for orders "
         f"that held nothing, {voided} payments voided ({late_approvals} approvals after a void "
         f"released again), {resent} cancellations sent again",
+        "  processor releases   " + (", ".join(f"{n} {result}" for result, n in
+                                              sorted(card_releases.items()))
+                                     if card_releases else "none"),
         f"  resubmits            {run.get('resubmits', 0)} retried submits over "
         f"{run.get('retriedOrders', 0)} orders, {run.get('replayedAnswers', 0)} answered from the "
         f"idempotency store ({replayed} replays counted by the service), "
