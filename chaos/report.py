@@ -64,7 +64,8 @@ def scrape(service):
         name, labels, value = m.group(1), m.group(2) or "", float(m.group(3))
         if name in ("ledgermesh_breaker_transitions_total", "resilience4j_retry_calls_total",
                     "ledgermesh_payments_deferred_total", "ledgermesh_payments_voided_total",
-                    "ledgermesh_payments_approvals_after_void_total",
+                    "ledgermesh_payments_surplus_approvals_total",
+                    "ledgermesh_payments_late_outcomes_total",
                     "ledgermesh_payments_releases_total",
                     "ledgermesh_saga_cancellations_resent_total",
                     "ledgermesh_consumer_duplicates_total",
@@ -221,9 +222,17 @@ def ledger(orders_path, out_path, settle=None):
     order.cancelled after the order has turned CANCELLED, which is all the drain waits for. So a
     ledger that breaks a money or stock rule is read again every 2 s, and the one written is the
     first that keeps every rule, or the last read once `settle` seconds pass without the number
-    of broken rules falling (or four times that in all)."""
+    of broken rules falling (or four times that in all).
+
+    Before the first read it waits out the longest processor call that can still be running: a
+    call the time limiter cut off runs on and can be approved up to the synthetic processor's
+    slow-millis after it started, and that approval is released by the payment service's next
+    sweep. Reading earlier could pass a ledger that such an approval is about to break."""
     with open(orders_path) as fh:
         submitted = json.load(fh)["submitted"]
+    inflight = inflight_wait()
+    print(f"ledger: waiting {inflight:.0f}s for processor calls still in flight", flush=True)
+    time.sleep(inflight)
     started = last_progress = time.time()
     fewest = None
     while True:
@@ -240,6 +249,17 @@ def ledger(orders_path, out_path, settle=None):
         json.dump(final, fh, indent=1)
     print(f"ledger: {len(submitted)} orders written to {out_path}, {broken} money or stock rules "
           f"broken", flush=True)
+
+
+def inflight_wait():
+    """Seconds to wait before reading the ledger: the synthetic processor's slow-millis, read from
+    the payment service's configuration, plus 2 s of margin and one 1 s sweep of the releases.
+    CHAOS_INFLIGHT_WAIT overrides it."""
+    if os.environ.get("CHAOS_INFLIGHT_WAIT"):
+        return float(os.environ["CHAOS_INFLIGHT_WAIT"])
+    yml = open("payment-service/src/main/resources/application.yml").read()
+    slow = re.search(r"slow-millis:\s*\$?\{?[A-Z_]*:?(\d+)", yml)
+    return (int(slow.group(1)) if slow else 3000) / 1000.0 + 3.0
 
 
 def read_ledger(submitted):
@@ -348,7 +368,7 @@ def audit(final):
         elif compensated and not rec["holds"]:
             problems.append((rec["id"], f"{outcome} but inventory never released it"))
         on_card = [h for h in rec.get("card", []) if h["state"] == "OUTSTANDING"]
-        if on_card and o["status"] == "CANCELLED":
+        if on_card:
             problems.append((rec["id"], f"{outcome} but the processor still holds "
                                         f"{', '.join(h['amount'] for h in on_card)} on the card"))
         if compensated and not o.get("compensated_at"):
@@ -447,7 +467,7 @@ def summary(orders_path, snapshots_path, kills_path, final_path=None):
     transitions = []
     retries = {"successful_with_retry": 0, "failed_with_retry": 0, "successful_without_retry": 0,
                "failed_without_retry": 0}
-    deferred = voided = late_approvals = resent = duplicates = releases = release_noops = 0
+    deferred = voided = surplus = late = resent = duplicates = releases = release_noops = 0
     replayed = 0
     card_releases = {}
     for service, counters in totals.items():
@@ -463,8 +483,10 @@ def summary(orders_path, snapshots_path, kills_path, final_path=None):
                 deferred += int(value)
             elif name == "ledgermesh_payments_voided_total":
                 voided += int(value)
-            elif name == "ledgermesh_payments_approvals_after_void_total":
-                late_approvals += int(value)
+            elif name == "ledgermesh_payments_surplus_approvals_total":
+                surplus += int(value)
+            elif name == "ledgermesh_payments_late_outcomes_total":
+                late += int(value)
             elif name == "ledgermesh_payments_releases_total":
                 result = label(labels, "result")
                 card_releases[result] = card_releases.get(result, 0) + int(value)
@@ -513,11 +535,11 @@ def summary(orders_path, snapshots_path, kills_path, final_path=None):
         f"  deferred payments    {deferred}",
         f"  duplicate events     {duplicates} ignored by idempotent consumers",
         f"  compensations        {releases} reservations released, {release_noops} releases for orders "
-        f"that held nothing, {voided} payments voided ({late_approvals} approvals after a void "
-        f"released again), {resent} cancellations sent again",
+        f"that held nothing, {voided} payments voided, {resent} cancellations sent again",
         "  processor releases   " + (", ".join(f"{n} {result}" for result, n in
                                               sorted(card_releases.items()))
-                                     if card_releases else "none"),
+                                     if card_releases else "none")
+        + f"; {late} answers after their time limit, {surplus} approvals not kept",
         f"  resubmits            {run.get('resubmits', 0)} retried submits over "
         f"{run.get('retriedOrders', 0)} orders, {run.get('replayedAnswers', 0)} answered from the "
         f"idempotency store ({replayed} replays counted by the service), "
