@@ -162,7 +162,14 @@ def scarce_stock():
     return sku, int(seeds[sku])
 
 
+def reservation_timeout():
+    """The reservation deadline in seconds, read from the order service's configuration."""
+    yml = (REPO / "order-service/src/main/resources/application.yml").read_text()
+    return int(re.search(r"reservation: \$\{SAGA_RESERVATION_TIMEOUT:(\d+)s\}", yml).group(1))
+
+
 SCARCE, SCARCE_STOCK = scarce_stock()
+RESERVATION_TIMEOUT = reservation_timeout()
 runs = {key: load(path) for key, path in RUNS.items()}
 base, base2 = runs["baseline"], runs["baseline-repeat"]
 chaos, chaos2 = runs["steady"], runs["steady-repeat"]
@@ -302,12 +309,30 @@ The three kill run in full, as the file contains it:
 ```
 
 `failed / stuck` counts orders that did not reach a terminal state, orders cancelled for any
-reason other than stock, and rejected submissions. `cancelled (stock)` are orders for
-`{SCARCE}`, which is seeded with {SCARCE_STOCK} units so the out of stock branch is exercised on
-every run. Retries, deferred payments and breaker transitions come from the synthetic processor's
-deterministic transient faults and from the kills themselves. Counters are snapshotted right
-before each kill because a killed JVM loses its in-memory meters. The last seven lines are the
-`/ops/overview` of each service read after the backlog drained.
+reason other than stock or a saga deadline, and rejected or duplicated submissions.
+`cancelled (stock)` are orders for `{SCARCE}`, which is seeded with {SCARCE_STOCK} units so the out
+of stock branch is exercised on every run. Retries, deferred payments and breaker transitions come
+from the synthetic processor's deterministic transient faults and from the kills themselves.
+Counters are snapshotted right before each kill because a killed JVM loses its in-memory meters.
+The last seven lines are the `/ops/overview` of each service read after the backlog drained.
+
+What a run guarantees, and what the harness checks: every submitted order reaches CONFIRMED or
+CANCELLED; a confirmed order is paid once, for its amount, and holds exactly the stock it asked
+for; a cancelled order is charged nothing and holds nothing; nothing is paid or held for an order
+that was never submitted, and the stock rows agree with the holds. An order may be cancelled for
+stock or because its saga outlived a deadline, and for nothing else. A deadline runs on the wall
+clock, the order service's own absences included, so a seed that kills the order service more
+than once can use up the {RESERVATION_TIMEOUT} s reservation window of an order placed just before
+the first kill; on the restart the reaper cancels it before the listener reads the reservation and
+the payment waiting for it. Such an order is compensated like any cancellation, its stock released
+and its payment voided, and a summary the harness writes now counts it under `cancelled (deadline)`
+with its reason instead of under `failed / stuck`. Before teardown the
+harness reads every order, its timeline, its payment and its stock holds from the three databases
+into `chaos/out/final.json`, waiting up to `CHAOS_DRAIN_TIMEOUT` for compensations still on their
+way; the `ledger` line fails the run on any money or stock rule broken, and `orders to read` lists
+every order that was not confirmed or cancelled for stock with its payment, holds and timeline.
+The {WORDS[len(runs)]} runs above were recorded before the harness wrote those lines, and each
+confirmed or cancelled for stock every order it took.
 
 The seed fixes the load, and, under one bash, the kill schedule the harness draws from it. Replaying
 the draw sequence of [chaos/loadgen.py](chaos/loadgen.py) at seed {seed} for the {mix["orders"]}
@@ -354,8 +379,8 @@ after 2 s), `CHAOS_DURATION`, `CHAOS_RATE`, `CHAOS_KILLS`, `CHAOS_RESTART_AFTER`
 printed when unset), `CHAOS_MAX_P95`, `CHAOS_DRAIN_TIMEOUT`, `CHAOS_DRAIN_CAP`, `CHAOS_RECORD=1`,
 `CHAOS_LABEL`, `CHAOS_KEEP_STACK=1`, `CHAOS_PYTHON`, and `LEDGERMESH_ORDER_PORT` /
 `LEDGERMESH_INVENTORY_PORT` / `LEDGERMESH_PAYMENT_PORT` when 8081 to 8083 are taken on the host.
-Output lands in `chaos/out/` (orders, kill timeline, metric snapshots, summary); the harness tears
-the stack down on every exit path unless `CHAOS_KEEP_STACK=1`.
+Output lands in `chaos/out/` (orders, kill timeline, metric snapshots, the final ledger, summary);
+the harness tears the stack down on every exit path unless `CHAOS_KEEP_STACK=1`.
 
 """
 
