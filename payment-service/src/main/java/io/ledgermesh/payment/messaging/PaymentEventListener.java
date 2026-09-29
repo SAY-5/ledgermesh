@@ -3,6 +3,7 @@ package io.ledgermesh.payment.messaging;
 import io.ledgermesh.common.correlation.CorrelationId;
 import io.ledgermesh.common.events.EventCodec;
 import io.ledgermesh.common.events.InventoryReserved;
+import io.ledgermesh.common.events.OrderCancelled;
 import io.ledgermesh.common.events.PaymentRequested;
 import io.ledgermesh.common.events.Topics;
 import io.ledgermesh.common.idempotency.IdempotentConsumer;
@@ -13,7 +14,8 @@ import org.springframework.stereotype.Component;
 
 /**
  * Records the payment idempotently, then authorizes it. Re-drive requests from the order service
- * are answered with the outcome on file or a fresh attempt.
+ * are answered with the outcome on file or a fresh attempt, and a cancelled order has its payment
+ * voided, or blocked when it is not on file yet.
  */
 @Component
 public class PaymentEventListener {
@@ -54,6 +56,17 @@ public class PaymentEventListener {
     CorrelationId.bind(correlationId);
     try {
       idempotent.once(CONSUMER, event.eventId(), () -> payments.requestAgain(event, correlationId));
+    } finally {
+      CorrelationId.clear();
+    }
+  }
+
+  @KafkaListener(id = "payment-cancels", topics = Topics.ORDER_CANCELLED, groupId = CONSUMER)
+  public void onOrderCancelled(ConsumerRecord<String, String> record) {
+    OrderCancelled event = codec.decode(record.value(), OrderCancelled.class);
+    CorrelationId.bind(CorrelationId.fromHeaders(record.headers(), event.correlationId()));
+    try {
+      idempotent.once(CONSUMER, event.eventId(), () -> payments.cancel(event));
     } finally {
       CorrelationId.clear();
     }

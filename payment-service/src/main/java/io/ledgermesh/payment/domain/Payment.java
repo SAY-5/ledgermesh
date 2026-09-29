@@ -82,6 +82,17 @@ public class Payment {
     this.nextAttemptAt = firstAttemptDeadline;
   }
 
+  /**
+   * The trace a cancellation leaves when no payment was on file for the order: voided, for nothing,
+   * never attempted. Whichever creator comes later finds it and leaves the order uncharged.
+   */
+  public static Payment voidedMarker(
+      String orderId, String correlationId, String reason, Instant now) {
+    Payment marker = new Payment(orderId, "", BigDecimal.ZERO, correlationId, now, null);
+    marker.voided(reason, now);
+    return marker;
+  }
+
   public void authorized(String code, Instant now) {
     this.status = PaymentStatus.AUTHORIZED;
     this.authorizationCode = code;
@@ -100,6 +111,14 @@ public class Payment {
     this.status = PaymentStatus.DEFERRED;
     this.reason = reason;
     this.nextAttemptAt = retryAt;
+    this.updatedAt = now;
+  }
+
+  /** Gives the payment up for a cancelled order; an authorization code stays as the record. */
+  public void voided(String reason, Instant now) {
+    this.status = PaymentStatus.VOIDED;
+    this.reason = reason;
+    this.nextAttemptAt = null;
     this.updatedAt = now;
   }
 

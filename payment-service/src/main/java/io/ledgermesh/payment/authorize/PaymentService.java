@@ -1,6 +1,7 @@
 package io.ledgermesh.payment.authorize;
 
 import io.ledgermesh.common.events.InventoryReserved;
+import io.ledgermesh.common.events.OrderCancelled;
 import io.ledgermesh.common.events.PaymentCompleted;
 import io.ledgermesh.common.events.PaymentFailed;
 import io.ledgermesh.common.events.PaymentRequested;
@@ -11,6 +12,7 @@ import io.ledgermesh.payment.domain.PaymentStatus;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -25,7 +27,8 @@ import org.springframework.transaction.support.TransactionTemplate;
  * Two step flow. {@link #record} durably stores the payment inside the consumer's idempotent
  * transaction. {@link #attempt} runs the authorization outside any transaction and then commits the
  * outcome plus its outbox event. A process killed between the two leaves an open payment which the
- * deferred queue picks up, so an order can only ever be completed or declined, never forgotten.
+ * deferred queue picks up, so a payment is only ever authorized, declined or voided, never
+ * forgotten.
  *
  * <p>A payment has two creators: {@link #record}, fed by {@code inventory.reserved}, and {@link
  * #requestAgain}, fed by {@code order.payment_requested} when no payment is on file. They consume
@@ -33,6 +36,10 @@ import org.springframework.transaction.support.TransactionTemplate;
  * create it. The payment is inserted and flushed right away, so whichever creator comes second
  * fails on the primary key before it calls the processor, its transaction rolls back, and the
  * redelivery the error handler makes finds the payment on file.
+ *
+ * <p>{@link #cancel}, fed by {@code order.cancelled}, voids the payment of an order that will never
+ * be fulfilled, or inserts a voided marker when it comes before both creators, the same way, so a
+ * race with a creator ends with one of the two delivered again onto the other's row.
  */
 @Service
 public class PaymentService {
@@ -122,6 +129,37 @@ public class PaymentService {
         event.orderId(),
         payment.getStatus());
     return payment.getStatus();
+  }
+
+  /**
+   * Answers a cancelled order. Payments are authorized off {@code inventory.reserved} whatever the
+   * order has become since, so a cancellation can find its payment authorized (the order passed its
+   * deadline while the answers waited for the order service to read them), open (the processor was
+   * away), or not on file yet (the reservation has not reached this service). An authorized or open
+   * payment is voided and a missing one is replaced by a voided marker, so neither a late
+   * reservation nor a re-drive charges for the order; a declined or voided payment stays as it is.
+   * An authorization that lands after the void finds the payment settled and is dropped.
+   */
+  @Transactional
+  public PaymentStatus cancel(OrderCancelled event) {
+    Instant now = clock.instant();
+    Payment payment = payments.findById(event.orderId()).orElse(null);
+    String before = payment == null ? "NONE" : payment.getStatus().name();
+    if (payment == null) {
+      payments.saveAndFlush(
+          Payment.voidedMarker(event.orderId(), event.correlationId(), event.reason(), now));
+    } else if (payment.getStatus() == PaymentStatus.AUTHORIZED || payment.getStatus().isOpen()) {
+      payment.voided(event.reason(), now);
+    } else {
+      return payment.getStatus();
+    }
+    meters.counter("ledgermesh.payments.voided", "was", before).increment();
+    log.info(
+        "payment for order {} voided, it was {} (order {})",
+        event.orderId(),
+        before,
+        event.reason());
+    return PaymentStatus.VOIDED;
   }
 
   private void reemit(Payment payment) {

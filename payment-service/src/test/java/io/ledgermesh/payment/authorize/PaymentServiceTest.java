@@ -8,6 +8,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -17,6 +18,7 @@ import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.ledgermesh.common.events.DomainEvent;
 import io.ledgermesh.common.events.EventCodec;
 import io.ledgermesh.common.events.InventoryReserved;
+import io.ledgermesh.common.events.OrderCancelled;
 import io.ledgermesh.common.events.OrderLine;
 import io.ledgermesh.common.events.PaymentRequested;
 import io.ledgermesh.common.events.Topics;
@@ -288,6 +290,87 @@ class PaymentServiceTest {
     }
   }
 
+  @Test
+  void aCancelledOrderHasItsAuthorizedPaymentVoided() {
+    when(processor.authorize(anyString(), anyString(), any(), anyInt()))
+        .thenReturn(new Approved("AUTH-20"));
+    listener.onInventoryReserved(consumed(reserved("o20")));
+    assertThat(payments.findById("o20").orElseThrow().getStatus())
+        .isEqualTo(PaymentStatus.AUTHORIZED);
+
+    ConsumerRecord<String, String> cancel = consumed(cancelled("o20"));
+    listener.onOrderCancelled(cancel);
+    listener.onOrderCancelled(cancel);
+
+    Payment voided = payments.findById("o20").orElseThrow();
+    assertThat(voided.getStatus()).isEqualTo(PaymentStatus.VOIDED);
+    assertThat(voided.getReason()).isEqualTo("RESERVATION_TIMEOUT");
+    assertThat(voided.getAuthorizationCode()).isEqualTo("AUTH-20");
+    assertThat(outbox.findAll())
+        .extracting(OutboxEvent::getTopic)
+        .containsExactly(Topics.PAYMENT_COMPLETED);
+  }
+
+  @Test
+  void aCancelThatArrivesBeforeThePaymentExistsKeepsItFromBeingMade() {
+    when(processor.authorize(anyString(), anyString(), any(), anyInt()))
+        .thenReturn(new Approved("AUTH-21"));
+
+    listener.onOrderCancelled(consumed(cancelled("o21")));
+    listener.onInventoryReserved(consumed(reserved("o21")));
+    listener.onPaymentRequested(consumed(requested("o21")));
+
+    Payment marker = payments.findById("o21").orElseThrow();
+    assertThat(marker.getStatus()).isEqualTo(PaymentStatus.VOIDED);
+    assertThat(marker.getAmount()).isEqualByComparingTo("0");
+    assertThat(marker.getAttempts()).isZero();
+    verify(processor, never()).authorize(anyString(), anyString(), any(), anyInt());
+    assertThat(outbox.findAll())
+        .extracting(OutboxEvent::getTopic)
+        .doesNotContain(Topics.PAYMENT_COMPLETED);
+  }
+
+  @Test
+  void anOpenPaymentIsVoidedAndNeverAttemptedAgain() {
+    when(processor.authorize(anyString(), anyString(), any(), anyInt()))
+        .thenThrow(new ProcessorUnavailableException("outage"));
+    service.record(reserved("o22"), "c");
+    assertThat(service.attempt("o22")).contains(PaymentStatus.DEFERRED);
+
+    listener.onOrderCancelled(consumed(cancelled("o22")));
+
+    reset(processor);
+    assertThat(service.sweep()).isZero();
+    assertThat(service.attempt("o22")).isEmpty();
+    assertThat(payments.findById("o22").orElseThrow().getStatus()).isEqualTo(PaymentStatus.VOIDED);
+    verify(processor, never()).authorize(anyString(), anyString(), any(), anyInt());
+    assertThat(outbox.count()).isZero();
+  }
+
+  @Test
+  void anAuthorizationThatLandsAfterTheVoidIsDropped() {
+    service.record(reserved("o23"), "c");
+    listener.onOrderCancelled(consumed(cancelled("o23")));
+
+    // the processor answered an attempt that read the payment before the cancel committed
+    assertThat(service.commit("o23", new AuthorizationOutcome.Authorized("AUTH-23")))
+        .isEqualTo(PaymentStatus.VOIDED);
+
+    assertThat(payments.findById("o23").orElseThrow().getAuthorizationCode()).isNull();
+    assertThat(outbox.count()).isZero();
+  }
+
+  @Test
+  void aDeclinedPaymentIsLeftAsItIsByTheCancel() {
+    when(processor.authorize(anyString(), anyString(), any(), anyInt()))
+        .thenReturn(new Declined("CARD_DECLINED"));
+    service.record(reserved("o24"), "c");
+    service.attempt("o24");
+
+    assertThat(service.cancel(cancelled("o24"))).isEqualTo(PaymentStatus.DECLINED);
+    assertThat(payments.findById("o24").orElseThrow().getReason()).isEqualTo("CARD_DECLINED");
+  }
+
   /**
    * A listener whose first lookup of the order's payment returns what it found and then waits for
    * {@code release}, which puts another creator's commit between that lookup and the save.
@@ -333,6 +416,16 @@ class PaymentServiceTest {
   private static PaymentRequested requested(String orderId) {
     return new PaymentRequested(
         "req-" + orderId, orderId, "c", Instant.now(), "cust", new BigDecimal("12.50"), 1);
+  }
+
+  private static OrderCancelled cancelled(String orderId) {
+    return new OrderCancelled(
+        "cancel-" + orderId,
+        orderId,
+        "c",
+        Instant.now(),
+        "RESERVATION_TIMEOUT",
+        List.of(new OrderLine("SKU", 1)));
   }
 
   private static InventoryReserved reserved(String orderId) {

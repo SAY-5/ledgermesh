@@ -6,7 +6,12 @@ public enum PaymentStatus {
   /** Processor was unavailable; queued for a later attempt. */
   DEFERRED,
   AUTHORIZED,
-  DECLINED;
+  DECLINED,
+  /**
+   * The order was cancelled: an authorization is given back, an open payment is never attempted,
+   * and a payment that did not exist yet is blocked by a marker that holds nothing.
+   */
+  VOIDED;
 
   public boolean isOpen() {
     return this == NEW || this == DEFERRED;
