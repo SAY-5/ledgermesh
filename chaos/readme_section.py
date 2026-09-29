@@ -318,8 +318,8 @@ The last seven lines are the `/ops/overview` of each service read after the back
 
 What a run guarantees, and what the harness checks: every submitted order reaches CONFIRMED or
 CANCELLED; a confirmed order is paid once, for its amount, holds exactly the stock it asked for,
-and has exactly its one authorization outstanding at the processor; a cancelled order is charged
-nothing, holds nothing and has nothing held for it on the card, and one cancelled for anything but
+and has exactly its one authorization outstanding at the processor; any other order, cancelled or
+still open, has none; a cancelled order is charged nothing and holds nothing, and one cancelled for anything but
 stock has had its cancellation answered by inventory (a released hold or marker) and by the payment
 service (a voided or declined payment, and `payment.voided` recorded by the order service), so no
 late reservation can still take stock or money for it; nothing is paid, held or authorized for an
@@ -331,9 +331,12 @@ the first kill; on the restart the reaper cancels it before the listener reads t
 the payment waiting for it. Such an order is compensated like any cancellation, its stock
 released, its payment voided and its authorization released at the processor, and a summary the
 harness writes now counts it under `cancelled (deadline)` with its reason instead of under
-`failed / stuck`. Before teardown the harness reads every order, its timeline, its payment, its
-stock holds and the synthetic processor's authorizations from the three databases into
-`chaos/out/final.json`, waiting up to `CHAOS_DRAIN_TIMEOUT` for compensations still on their way;
+`failed / stuck`. Before teardown the harness waits out the longest processor call that can still
+be running (the synthetic processor's `slow-millis` plus a margin and a sweep, or
+`CHAOS_INFLIGHT_WAIT`), since a call cut off by its time limit can still approve, then reads every
+order, its timeline, its payment, its stock holds and the synthetic processor's authorizations
+from the three databases into `chaos/out/final.json`, waiting up to `CHAOS_DRAIN_TIMEOUT` for
+compensations still on their way;
 the `ledger` line fails the run on any money or stock rule broken, and `orders to read` lists every
 order that was not confirmed or cancelled for stock with its payment, what the card holds, its
 stock holds and its timeline. The {WORDS[len(runs)]} runs above were recorded before the harness
@@ -381,7 +384,8 @@ rather than a subtle one.
 Knobs: `CHAOS_PROFILE` (`steady` three kills restarting after 5 s, `tight` six kills restarting
 after 2 s), `CHAOS_DURATION`, `CHAOS_RATE`, `CHAOS_KILLS`, `CHAOS_RESTART_AFTER`, `CHAOS_VICTIMS`
 (default all three services), `CHAOS_SEED` (the load and the kill schedule; a fresh one is drawn and
-printed when unset), `CHAOS_MAX_P95`, `CHAOS_DRAIN_TIMEOUT`, `CHAOS_DRAIN_CAP`, `CHAOS_RECORD=1`,
+printed when unset), `CHAOS_MAX_P95`, `CHAOS_DRAIN_TIMEOUT`, `CHAOS_DRAIN_CAP`, `CHAOS_INFLIGHT_WAIT`,
+`CHAOS_RECORD=1`,
 `CHAOS_LABEL`, `CHAOS_KEEP_STACK=1`, `CHAOS_PYTHON`, and `LEDGERMESH_ORDER_PORT` /
 `LEDGERMESH_INVENTORY_PORT` / `LEDGERMESH_PAYMENT_PORT` when 8081 to 8083 are taken on the host.
 Output lands in `chaos/out/` (orders, kill timeline, metric snapshots, the final ledger, summary);

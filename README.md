@@ -2,8 +2,9 @@
 
 Fault tolerant order processing across three Spring Boot microservices on Docker: Kafka
 messaging (Redpanda), Redis caching, Resilience4j circuit breakers, time limiters and retries,
-a GitLab CI pipeline, and a chaos test that kills one service under load and proves that no order
-was lost or charged without being fulfilled.
+a GitLab CI pipeline, and a chaos test that kills one service under load and then checks, order by
+order, that none was lost and none is left charged, in the payment ledger or on the card, without
+being confirmed.
 
 `make chaos` starts the stack, submits orders at 20/s for 60 s, kills the inventory, payment or
 order service three times at random moments (restarting each after 5 s), waits for the saga
@@ -143,26 +144,28 @@ each kill because a killed JVM loses its in-memory meters. The last seven lines 
 
 What a run guarantees, and what the harness checks: every submitted order reaches CONFIRMED or
 CANCELLED; a confirmed order is paid once, for its amount, holds exactly the stock it asked for, and
-has exactly its one authorization outstanding at the processor; a cancelled order is charged
-nothing, holds nothing and has nothing held for it on the card, and one cancelled for anything but
-stock has had its cancellation answered by inventory (a released hold or marker) and by the payment
-service (a voided or declined payment, and `payment.voided` recorded by the order service), so no
-late reservation can still take stock or money for it; nothing is paid, held or authorized for an
-order that was never submitted, and the stock rows agree with the holds. An order may be cancelled
-for stock or because its saga outlived a deadline, and for nothing else. A deadline runs on the wall
-clock, the order service's own absences included, so a seed that kills the order service more than
-once can use up the 60 s reservation window of an order placed just before the first kill; on the
-restart the reaper cancels it before the listener reads the reservation and the payment waiting for
-it. Such an order is compensated like any cancellation, its stock released, its payment voided and
-its authorization released at the processor, and a summary the harness writes now counts it under
-`cancelled (deadline)` with its reason instead of under `failed / stuck`. Before teardown the
-harness reads every order, its timeline, its payment, its stock holds and the synthetic processor's
-authorizations from the three databases into `chaos/out/final.json`, waiting up to
-`CHAOS_DRAIN_TIMEOUT` for compensations still on their way; the `ledger` line fails the run on any
-money or stock rule broken, and `orders to read` lists every order that was not confirmed or
-cancelled for stock with its payment, what the card holds, its stock holds and its timeline. The
-four runs above were recorded before the harness wrote those lines, and each confirmed or cancelled
-for stock every order it took.
+has exactly its one authorization outstanding at the processor; any other order, cancelled or still
+open, has none; a cancelled order is charged nothing and holds nothing, and one cancelled for
+anything but stock has had its cancellation answered by inventory (a released hold or marker) and by
+the payment service (a voided or declined payment, and `payment.voided` recorded by the order
+service), so no late reservation can still take stock or money for it; nothing is paid, held or
+authorized for an order that was never submitted, and the stock rows agree with the holds. An order
+may be cancelled for stock or because its saga outlived a deadline, and for nothing else. A deadline
+runs on the wall clock, the order service's own absences included, so a seed that kills the order
+service more than once can use up the 60 s reservation window of an order placed just before the
+first kill; on the restart the reaper cancels it before the listener reads the reservation and the
+payment waiting for it. Such an order is compensated like any cancellation, its stock released, its
+payment voided and its authorization released at the processor, and a summary the harness writes now
+counts it under `cancelled (deadline)` with its reason instead of under `failed / stuck`. Before
+teardown the harness waits out the longest processor call that can still be running (the synthetic
+processor's `slow-millis` plus a margin and a sweep, or `CHAOS_INFLIGHT_WAIT`), since a call cut off
+by its time limit can still approve, then reads every order, its timeline, its payment, its stock
+holds and the synthetic processor's authorizations from the three databases into
+`chaos/out/final.json`, waiting up to `CHAOS_DRAIN_TIMEOUT` for compensations still on their way;
+the `ledger` line fails the run on any money or stock rule broken, and `orders to read` lists every
+order that was not confirmed or cancelled for stock with its payment, what the card holds, its stock
+holds and its timeline. The four runs above were recorded before the harness wrote those lines, and
+each confirmed or cancelled for stock every order it took.
 
 The seed fixes the load, and, under one bash, the kill schedule the harness draws from it. Replaying
 the draw sequence of [chaos/loadgen.py](chaos/loadgen.py) at seed 3 for the 1200 orders of this
@@ -211,11 +214,12 @@ no reason, so this one catches a gross regression rather than a subtle one.
 Knobs: `CHAOS_PROFILE` (`steady` three kills restarting after 5 s, `tight` six kills restarting
 after 2 s), `CHAOS_DURATION`, `CHAOS_RATE`, `CHAOS_KILLS`, `CHAOS_RESTART_AFTER`, `CHAOS_VICTIMS`
 (default all three services), `CHAOS_SEED` (the load and the kill schedule; a fresh one is drawn and
-printed when unset), `CHAOS_MAX_P95`, `CHAOS_DRAIN_TIMEOUT`, `CHAOS_DRAIN_CAP`, `CHAOS_RECORD=1`,
-`CHAOS_LABEL`, `CHAOS_KEEP_STACK=1`, `CHAOS_PYTHON`, and `LEDGERMESH_ORDER_PORT` /
-`LEDGERMESH_INVENTORY_PORT` / `LEDGERMESH_PAYMENT_PORT` when 8081 to 8083 are taken on the host.
-Output lands in `chaos/out/` (orders, kill timeline, metric snapshots, the final ledger, summary);
-the harness tears the stack down on every exit path unless `CHAOS_KEEP_STACK=1`.
+printed when unset), `CHAOS_MAX_P95`, `CHAOS_DRAIN_TIMEOUT`, `CHAOS_DRAIN_CAP`,
+`CHAOS_INFLIGHT_WAIT`, `CHAOS_RECORD=1`, `CHAOS_LABEL`, `CHAOS_KEEP_STACK=1`, `CHAOS_PYTHON`, and
+`LEDGERMESH_ORDER_PORT` / `LEDGERMESH_INVENTORY_PORT` / `LEDGERMESH_PAYMENT_PORT` when 8081 to 8083
+are taken on the host. Output lands in `chaos/out/` (orders, kill timeline, metric snapshots, the
+final ledger, summary); the harness tears the stack down on every exit path unless
+`CHAOS_KEEP_STACK=1`.
 
 ## Tests
 
@@ -377,10 +381,14 @@ state machine and outbox as any inbound event:
 * RESERVED past its deadline again: `CANCELLED (PAYMENT_TIMEOUT)` with release and void.
 
 The payment service authorizes off `inventory.reserved` whatever the order has become since, so it
-reads `order.cancelled` too: an authorized or open payment is voided and the processor is asked to
-release every authorization it holds for the order, until it confirms, and again if an approval
-lands after the void; a cancellation that arrives before any payment leaves a voided marker, so the
-late reservation or re-drive never calls the processor. Every cancellation is answered with
+reads `order.cancelled` too: an authorized or open payment is voided, and a cancellation that
+arrives before any payment leaves a voided marker, so the late reservation or re-drive never calls
+the processor. The processor is then asked to release every authorization it holds for the order,
+from the sweeper, behind its breaker and time limit, until it confirms. Every processor answer
+reaches the payment, one that came after its time limit included, every approval is an authorization
+of its own, and an approval the payment does not keep (after the void, or a second one besides the
+authorization it keeps) makes a release due again; a cancellation sent again, and a restart of the
+payment service, have the processor checked once more. Every cancellation is answered with
 `payment.voided`, and until that answer arrives the reaper sends `order.cancelled` again every
 `ledgermesh.saga.compensation` (default 60 s), so a cancellation the payment service dead lettered
 is voided on the next copy without anyone replaying it. A deadline runs on the wall clock, including
