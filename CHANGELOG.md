@@ -20,13 +20,19 @@ see the versioning note in [CONTRIBUTING.md](CONTRIBUTING.md).
   an authorized or open payment, or inserts a voided marker when the cancellation comes first, so a
   late reservation or re-drive charges nothing.
 * A void was only a status on the payment row: the processor kept the authorization, and an
-  approval that landed after the void (an attempt that had read the payment open, or a reservation
-  that reached the payment service after the cancellation) was dropped from the ledger but left
-  on the card. The processor now releases every authorization it holds under an order's reference,
-  idempotently; the synthetic processor keeps what it granted in a `processor_hold` table of its
-  own, committed apart from the payment service's transactions. A void makes a release due, the
-  listener asks for it at once and the sweeper again until the processor confirms, recorded only on
-  the version of the payment it read, and an approval that lands after the void makes it due again.
+  approval that landed after the void (an attempt that had read the payment open, a reservation that
+  reached the payment service after the cancellation, or a call the time limiter had cut off, which
+  runs on and approves up to `slow-millis` later) was dropped from the ledger but left on the card.
+  Every processor answer now reaches the payment, one that came after its time limit included, and
+  every approval is an authorization with a code of its own. A payment keeps one authorization while
+  it is authorized and none otherwise, and the processor releases, by order reference and
+  idempotently, everything else it holds for the order. A release is due after an authorization, a
+  void, a cancellation sent again, any approval the payment does not keep, and, after a restart, for
+  every payment settled in the last ten minutes; the sweeper asks for it behind the processor's
+  breaker and time limit, records it only on the version of the payment it read, and backs off
+  after a refusal. The synthetic processor keeps what it granted in a `processor_hold` table of its
+  own, one row per authorization, committed apart from the payment service's transactions, and it
+  and its table exist only while `ledgermesh.processor.synthetic` is on.
 * A cancellation the payment service could not apply before its retries ran out went to
   `order.cancelled.dlq`, where only an operator's replay could bring it back, and the charge stayed.
   The payment service now answers every cancellation with `payment.voided`, the order service
@@ -38,19 +44,20 @@ see the versioning note in [CONTRIBUTING.md](CONTRIBUTING.md).
   applies, so its first start reads every cancellation still inside the topic's retention (the
   broker's default, as nothing here sets one) and voids what it finds; older cancellations are not
   read. Orders cancelled before the upgrade are not waiting for `payment.voided` either. After
-  upgrading, call `POST /admin/compensations/resend` on the order service, again while `resent`
-  comes back equal to `max`: it sends `order.cancelled` again for every cancelled order whose
-  cancellation was never answered, oldest first, and from then on each waits for its answer like a
-  new cancellation. Inventory treats the copies as the no-op releases they are.
-* The chaos harness reads every order, its timeline, its payment, its stock holds and the
-  synthetic processor's authorizations from the three databases into `chaos/out/final.json`, and
-  fails a run whose ledger breaks a money or stock rule: a confirmed order paid once, holding its
-  stock and its one authorization, a cancelled one charged nothing, holding nothing, with nothing
-  left on the card and its cancellation answered. A cancellation for a saga deadline is counted
-  under `cancelled (deadline)` with its reason instead of under `failed / stuck`, and every order
-  that was not confirmed or cancelled for stock is listed with its payment, card, holds and
-  timeline. The GitHub chaos job takes a `chaos_seeds` input when started by hand and runs one job
-  per seed listed.
+  upgrading, call `POST /admin/compensations/resend` on the order service, and again until it
+  answers `resent: 0`: each call sends `order.cancelled` again for up to `max` (1 to 1000) cancelled
+  orders whose cancellation was never answered and that are not waiting for an answer, oldest
+  first, and each one sent waits for its answer from then on like a new cancellation, so the next
+  call takes the next ones. Inventory treats the copies as the no-op releases they are.
+* The chaos harness waits out the longest processor call that can still be running, then reads every
+  order, its timeline, its payment, its stock holds and the synthetic processor's authorizations
+  from the three databases into `chaos/out/final.json`, and fails a run whose ledger breaks a money
+  or stock rule: a confirmed order paid once, holding its stock and its one authorization, any other
+  order holding no authorization, a cancelled one charged nothing, holding nothing and its
+  cancellation answered. A cancellation for a saga deadline is counted under `cancelled (deadline)`
+  with its reason instead of under `failed / stuck`, and every order that was not confirmed or
+  cancelled for stock is listed with its payment, card, holds and timeline. The GitHub chaos job
+  takes a `chaos_seeds` input when started by hand and runs one job per seed listed.
 * Two calls racing on one `Idempotency-Key` could both place an order. The answer was saved with a
   merge, which reads the row first: a call that stored its answer after the other had committed
   found that row and overwrote it instead of failing on the primary key, and both orders were
