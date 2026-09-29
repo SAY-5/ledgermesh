@@ -124,8 +124,10 @@ LOADGEN=""
 log "load finished, waiting for the saga backlog to drain"
 $PY chaos/report.py drain "$OUT/orders.json" "$DRAIN_TIMEOUT" "$DRAIN_CAP" || log "drain timed out"
 # Every order with its timeline, payment and stock holds, read from the databases before teardown,
-# so the summary can audit money and stock and a failed run names what happened to each order.
-$PY chaos/report.py ledger "$OUT/orders.json" "$OUT/final.json" || log "could not read the final ledger"
+# so the summary can audit money and stock and a failed run names what happened to each order. A
+# cancellation is compensated after it is terminal, so the read waits for that as the drain does.
+$PY chaos/report.py ledger "$OUT/orders.json" "$OUT/final.json" "$DRAIN_TIMEOUT" \
+  || log "could not read the final ledger"
 
 echo
 if $PY chaos/report.py summary "$OUT/orders.json" "$OUT/snapshots.jsonl" "$OUT/kills.jsonl" "$OUT/final.json"; then

@@ -8,9 +8,16 @@ its timeline, its payment and its stock holds straight from the three databases
 into final.json, so a failed run explains itself. The summary opens with the
 provenance of the run (commit, time, host, Docker, profile and every knob in
 effect) so a recorded summary can be re-derived, and audits that ledger: money
-and stock must follow each order's outcome. Exit code is non zero when any order
-failed or is stuck, when the ledger breaks a money or stock rule or cannot be
-read, or when CHAOS_MAX_P95 is set and the p95 saga latency exceeds it.
+and stock must follow each order's outcome.
+
+What a run guarantees: every submitted order reaches CONFIRMED or CANCELLED;
+a confirmed order is paid once, for its amount, and holds its stock; a cancelled
+order is charged nothing and holds nothing. An order is cancelled only for stock
+or because its saga outlived a deadline (RESERVATION_TIMEOUT, PAYMENT_TIMEOUT),
+and a deadline cancellation is reported as a class of its own. Exit code is non
+zero when an order is stuck or cancelled for another reason, when a submission
+was refused or placed twice, when the ledger breaks a money or stock rule or
+cannot be read, or when CHAOS_MAX_P95 is set and the p95 saga latency exceeds it.
 """
 import json
 import os
@@ -28,6 +35,8 @@ SERVICES = {
     "payment-service": "http://localhost:" + os.environ.get("LEDGERMESH_PAYMENT_PORT", "8083"),
 }
 TERMINAL = {"CONFIRMED", "CANCELLED"}
+# the saga deadlines the reaper enforces; cancelling for one of these is compensated, not failed
+DEADLINES = ("RESERVATION_TIMEOUT", "PAYMENT_TIMEOUT")
 LINE = re.compile(r'^([a-zA-Z_:][\w:]*)(\{[^}]*\})?\s+([-+eE.\d]+)$')
 KNOBS = ["CHAOS_PROFILE", "CHAOS_DURATION", "CHAOS_RATE", "CHAOS_KILLS", "CHAOS_RESTART_AFTER",
          "CHAOS_VICTIMS", "CHAOS_SEED", "CHAOS_DRAIN_TIMEOUT", "CHAOS_DRAIN_CAP", "CHAOS_MAX_P95"]
@@ -51,7 +60,8 @@ def scrape(service):
             continue
         name, labels, value = m.group(1), m.group(2) or "", float(m.group(3))
         if name in ("ledgermesh_breaker_transitions_total", "resilience4j_retry_calls_total",
-                    "ledgermesh_payments_deferred_total", "ledgermesh_consumer_duplicates_total",
+                    "ledgermesh_payments_deferred_total", "ledgermesh_payments_voided_total",
+                    "ledgermesh_consumer_duplicates_total",
                     "ledgermesh_outbox_published_total", "ledgermesh_inventory_releases_total",
                     "ledgermesh_requests_replayed_total"):
             counters[name + labels] = value
@@ -195,13 +205,38 @@ def by_order(records):
     return grouped
 
 
-def ledger(orders_path, out_path):
+def ledger(orders_path, out_path, settle=None):
     """Writes the final state of every submitted order, read from the databases rather than the
     APIs: the order row and its timeline, the payment the payment service holds for it and the
     stock holds the inventory ledger records for it, plus the stock rows and any order, payment or
-    hold that belongs to no submitted order."""
+    hold that belongs to no submitted order.
+
+    A cancellation is terminal before it is compensated: the release and the void travel on
+    order.cancelled after the order has turned CANCELLED, which is all the drain waits for. So a
+    ledger that breaks a money or stock rule is read again every 2 s, and the one written is the
+    first that keeps every rule, or the last read once `settle` seconds pass without the number
+    of broken rules falling (or four times that in all)."""
     with open(orders_path) as fh:
         submitted = json.load(fh)["submitted"]
+    started = last_progress = time.time()
+    fewest = None
+    while True:
+        final = read_ledger(submitted)
+        broken = len(audit(final))
+        if fewest is None or broken < fewest:
+            fewest, last_progress = broken, time.time()
+        now = time.time()
+        if not broken or not settle or now - last_progress >= settle or now - started >= settle * 4:
+            break
+        print(f"ledger: {broken} money or stock rules broken, waiting for compensations", flush=True)
+        time.sleep(2)
+    with open(out_path, "w") as fh:
+        json.dump(final, fh, indent=1)
+    print(f"ledger: {len(submitted)} orders written to {out_path}, {broken} money or stock rules "
+          f"broken", flush=True)
+
+
+def read_ledger(submitted):
     orders = {r["id"]: r for r in rows(
         "orders", "select id, status, reason, customer_id, amount::text as amount, created_at, "
                   "updated_at, deadline_at, redrives from orders")}
@@ -231,10 +266,7 @@ def ledger(orders_path, out_path):
             "holds": {k: v for k, v in holds.items() if k not in known},
         },
     }
-    with open(out_path, "w") as fh:
-        json.dump(final, fh, indent=1)
-    print(f"ledger: {len(ids)} orders, {len(payments)} payments and "
-          f"{sum(len(v) for v in holds.values())} stock holds written to {out_path}")
+    return final
 
 
 def audit(final):
@@ -321,7 +353,12 @@ def summary(orders_path, snapshots_path, kills_path, final_path=None):
             latencies.append((updated - created) * 1000.0)
     confirmed = sum(1 for s, _ in states.values() if s == "CONFIRMED")
     cancelled_stock = sum(1 for s, r in states.values() if s == "CANCELLED" and r == "OUT_OF_STOCK")
-    cancelled_other = sum(1 for s, r in states.values() if s == "CANCELLED" and r != "OUT_OF_STOCK")
+    deadline = {}
+    for s, r in states.values():
+        if s == "CANCELLED" and r in DEADLINES:
+            deadline[r] = deadline.get(r, 0) + 1
+    cancelled_other = sum(1 for s, r in states.values()
+                          if s == "CANCELLED" and r != "OUT_OF_STOCK" and r not in DEADLINES)
     stuck = sum(1 for s, _ in states.values() if s not in TERMINAL)
     # one accepted submit per key: a retried key that placed two orders would show up here
     duplicate_orders = len(submitted) - len({o["id"] for o in submitted})
@@ -362,7 +399,7 @@ def summary(orders_path, snapshots_path, kills_path, final_path=None):
     transitions = []
     retries = {"successful_with_retry": 0, "failed_with_retry": 0, "successful_without_retry": 0,
                "failed_without_retry": 0}
-    deferred = duplicates = releases = release_noops = replayed = 0
+    deferred = voided = duplicates = releases = release_noops = replayed = 0
     for service, counters in totals.items():
         for key, value in counters.items():
             name, _, labels = key.partition("{")
@@ -374,6 +411,8 @@ def summary(orders_path, snapshots_path, kills_path, final_path=None):
                 retries[label(labels, "kind")] = retries.get(label(labels, "kind"), 0) + int(value)
             elif name == "ledgermesh_payments_deferred_total":
                 deferred += int(value)
+            elif name == "ledgermesh_payments_voided_total":
+                voided += int(value)
             elif name == "ledgermesh_consumer_duplicates_total":
                 duplicates += int(value)
             elif name == "ledgermesh_inventory_releases_total":
@@ -400,6 +439,8 @@ def summary(orders_path, snapshots_path, kills_path, final_path=None):
         f"  orders submitted     {len(submitted)}",
         f"  confirmed            {confirmed}",
         f"  cancelled (stock)    {cancelled_stock}",
+        f"  cancelled (deadline) {sum(deadline.values())}"
+        + (f"  ({deadline_detail(deadline, final)})" if deadline else ""),
         f"  failed / stuck       {failed}",
         f"  kills                {len(kills)}  ({timeline})" if kills else "  kills                0  (baseline, no kills)",
         f"  saga latency         p50 {p50:.0f} ms   p95 {p95:.0f} ms   max {pmax:.0f} ms",
@@ -415,7 +456,7 @@ def summary(orders_path, snapshots_path, kills_path, final_path=None):
         f"  deferred payments    {deferred}",
         f"  duplicate events     {duplicates} ignored by idempotent consumers",
         f"  compensations        {releases} reservations released, {release_noops} releases for orders "
-        f"that held nothing",
+        f"that held nothing, {voided} payments voided",
         f"  resubmits            {run.get('resubmits', 0)} retried submits over "
         f"{run.get('retriedOrders', 0)} orders, {run.get('replayedAnswers', 0)} answered from the "
         f"idempotency store ({replayed} replays counted by the service), "
@@ -431,6 +472,23 @@ def summary(orders_path, snapshots_path, kills_path, final_path=None):
     with open(SUMMARY_PATH, "w") as fh:
         fh.write(text + "\n")
     return failed + len(problems) + (1 if unreadable else 0) + (1 if breached else 0)
+
+
+def deadline_detail(counts, final):
+    """The reasons behind the deadline cancellations and, from the ledger, what their payments
+    and stock holds ended as."""
+    text = ", ".join(f"{reason} {n}" for reason, n in sorted(counts.items()))
+    if not final:
+        return text
+    payments, held = {}, 0
+    for rec in final["orders"]:
+        o = rec["order"]
+        if o and o["status"] == "CANCELLED" and o["reason"] in DEADLINES:
+            state = rec["payment"]["status"] if rec["payment"] else "none"
+            payments[state] = payments.get(state, 0) + 1
+            held += sum(1 for h in rec["holds"] if h["state"] == "RESERVED")
+    paid = ", ".join(f"{state} {n}" for state, n in sorted(payments.items()))
+    return f"{text}; payments {paid}; holds left {held}"
 
 
 def ledger_lines(final, problems, unreadable, final_path, shown=20):
@@ -478,7 +536,7 @@ if __name__ == "__main__":
     elif cmd == "drain":
         sys.exit(1 if wait_drain(sys.argv[2], float(sys.argv[3]), float(sys.argv[4]) if len(sys.argv) > 4 else None) else 0)
     elif cmd == "ledger":
-        ledger(sys.argv[2], sys.argv[3])
+        ledger(sys.argv[2], sys.argv[3], float(sys.argv[4]) if len(sys.argv) > 4 else None)
     elif cmd == "summary":
         sys.exit(1 if summary(*sys.argv[2:6]) else 0)
     else:
