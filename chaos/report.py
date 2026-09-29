@@ -284,7 +284,7 @@ def configured_reconciliation():
     yml = open("payment-service/src/main/resources/application.yml").read()
 
     def seconds(value):
-        value = value.strip()
+        value = re.sub(r"^\$\{[A-Z_]+:(.*)\}$", r"\1", value.strip())
         if value.endswith("ms"):
             return float(value[:-2]) / 1000
         if value.endswith("s"):
@@ -292,10 +292,10 @@ def configured_reconciliation():
         return float(value) / 1000
 
     limits = [seconds(v) for v in re.findall(r"timeout-duration:\s*(\S+)", yml)]
-    slow = re.search(r"slow-millis:\s*(\d+)", yml)
+    slow = re.search(r"slow-millis:\s*(?:\$\{[A-Z_]+:)?(\d+)", yml)
     call = max(limits + ([int(slow.group(1)) / 1000] if slow else []) or [5.0])
     allowance = re.search(r"commit-allowance:\s*(\S+)", yml)
-    interval = re.search(r"reconcile-ms:\s*(\d+)", yml)
+    interval = re.search(r"reconcile-ms:\s*(?:\$\{[A-Z_]+:)?(\d+)", yml)
     return (call + (seconds(allowance.group(1)) if allowance else 5.0),
             int(interval.group(1)) / 1000 if interval else 5.0)
 

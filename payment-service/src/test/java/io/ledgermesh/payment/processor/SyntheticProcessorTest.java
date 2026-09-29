@@ -145,7 +145,8 @@ class SyntheticProcessorTest {
     }
 
     @Override
-    public List<PaymentProcessor.Authorization> outstanding(int limit) {
+    public List<PaymentProcessor.Authorization> outstanding(
+        PaymentProcessor.Authorization after, int limit) {
       return codes.entrySet().stream()
           .filter(h -> open.get(h.getKey()))
           .map(

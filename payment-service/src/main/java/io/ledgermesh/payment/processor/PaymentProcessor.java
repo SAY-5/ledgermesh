@@ -43,8 +43,12 @@ public interface PaymentProcessor {
   /** Releases one authorization by its code; returns whether it was outstanding. Idempotent. */
   boolean releaseAuthorization(String orderId, String authorizationCode);
 
-  /** The merchant's outstanding authorizations, oldest first, at most {@code limit} of them. */
-  List<Authorization> outstanding(int limit);
+  /**
+   * The merchant's outstanding authorizations in grant order, at most {@code limit} of them,
+   * starting after {@code after} (from the first when null), so a caller can page through all of
+   * them.
+   */
+  List<Authorization> outstanding(Authorization after, int limit);
 
   /**
    * The longest a call can run before the processor answers or gives up, which is the bound the

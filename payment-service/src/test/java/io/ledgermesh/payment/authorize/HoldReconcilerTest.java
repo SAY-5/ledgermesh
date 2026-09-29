@@ -27,7 +27,11 @@ import org.springframework.boot.test.context.SpringBootTest;
  * can belong to, with the authorization past the grace period or still inside it. Nothing here asks
  * the sweeper for a release, so whatever is released, the reconciler released.
  */
-@SpringBootTest(properties = "spring.datasource.url=jdbc:h2:mem:reconciler;DB_CLOSE_DELAY=-1")
+@SpringBootTest(
+    properties = {
+      "spring.datasource.url=jdbc:h2:mem:reconciler;DB_CLOSE_DELAY=-1",
+      "ledgermesh.payment.reconcile.page=2"
+    })
 class HoldReconcilerTest {
 
   @Autowired private PaymentService service;
@@ -125,6 +129,24 @@ class HoldReconcilerTest {
 
     assertThat(reconcile(pastGrace())).isEqualTo(2);
     assertThat(holds.outstanding(open)).isZero();
+    assertThat(holds.outstanding(voided)).isZero();
+  }
+
+  /** With a page of two, the kept authorizations of earlier orders fill the first pages. */
+  @Test
+  void anUnkeptAuthorizationBehindPagesOfKeptOnesIsReachedToo() {
+    for (int i = 0; i < 5; i++) {
+      String kept = order();
+      service.record(reserved(kept), "c");
+      grant(kept, "P" + i);
+      service.commit(kept, new AuthorizationOutcome.Authorized(code(kept, "P" + i)));
+    }
+    String voided = order();
+    service.record(reserved(voided), "c");
+    grant(voided, "LAST");
+    service.cancel(cancelled(voided));
+
+    assertThat(reconcile(pastGrace())).isEqualTo(1);
     assertThat(holds.outstanding(voided)).isZero();
   }
 

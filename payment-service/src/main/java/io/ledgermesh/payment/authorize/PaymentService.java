@@ -123,6 +123,16 @@ public class PaymentService {
    * answered with nothing rather than with a decline it never had.
    */
   public PaymentStatus requestAgain(PaymentRequested event, String correlationId) {
+    PaymentStatus status = answerRedrive(event, correlationId);
+    return status.isOpen() ? attempt(event.orderId(), true).orElse(status) : status;
+  }
+
+  /**
+   * The part of a re-drive that belongs in the consumer's transaction: records an unknown payment
+   * from the request and re-emits a settled one's outcome. An open payment is returned open, for
+   * the caller to attempt once that transaction has committed, so no processor call runs inside it.
+   */
+  public PaymentStatus answerRedrive(PaymentRequested event, String correlationId) {
     Payment payment =
         tx.execute(
             status ->
@@ -140,7 +150,7 @@ public class PaymentService {
                                     clock.instant()))));
     if (payment.getStatus().isOpen()) {
       meters.counter("ledgermesh.payments.redriven", "state", "open").increment();
-      return attempt(event.orderId(), true).orElse(payment.getStatus());
+      return payment.getStatus();
     }
     if (payment.getStatus() == PaymentStatus.VOIDED) {
       meters.counter("ledgermesh.payments.redriven", "state", "voided").increment();

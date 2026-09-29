@@ -24,6 +24,9 @@ public interface AuthorizationHolds {
   /** How many authorizations of the order are outstanding. */
   int outstanding(String orderId);
 
-  /** Every outstanding authorization, oldest first, at most {@code limit}. */
-  List<PaymentProcessor.Authorization> outstanding(int limit);
+  /**
+   * Outstanding authorizations in grant order (grant time, then code), at most {@code limit},
+   * starting after {@code after} (from the first when null).
+   */
+  List<PaymentProcessor.Authorization> outstanding(PaymentProcessor.Authorization after, int limit);
 }

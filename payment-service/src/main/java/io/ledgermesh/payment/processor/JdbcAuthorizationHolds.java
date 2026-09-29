@@ -5,6 +5,7 @@ import java.sql.Timestamp;
 import java.time.Clock;
 import java.util.List;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -90,17 +91,33 @@ public class JdbcAuthorizationHolds implements AuthorizationHolds {
   }
 
   @Override
-  public List<PaymentProcessor.Authorization> outstanding(int limit) {
-    return jdbc.query(
-        "select order_id, authorization_code, amount, granted_at from processor_hold"
-            + " where state = ? order by granted_at, authorization_code limit ?",
-        (rs, row) ->
+  public List<PaymentProcessor.Authorization> outstanding(
+      PaymentProcessor.Authorization after, int limit) {
+    RowMapper<PaymentProcessor.Authorization> row =
+        (rs, n) ->
             new PaymentProcessor.Authorization(
                 rs.getString("order_id"),
                 rs.getString("authorization_code"),
                 rs.getBigDecimal("amount"),
-                rs.getTimestamp("granted_at").toInstant()),
+                rs.getTimestamp("granted_at").toInstant());
+    if (after == null) {
+      return jdbc.query(
+          "select order_id, authorization_code, amount, granted_at from processor_hold"
+              + " where state = ? order by granted_at, authorization_code limit ?",
+          row,
+          OUTSTANDING,
+          limit);
+    }
+    Timestamp at = Timestamp.from(after.grantedAt());
+    return jdbc.query(
+        "select order_id, authorization_code, amount, granted_at from processor_hold"
+            + " where state = ? and (granted_at > ? or (granted_at = ? and authorization_code > ?))"
+            + " order by granted_at, authorization_code limit ?",
+        row,
         OUTSTANDING,
+        at,
+        at,
+        after.authorizationCode(),
         limit);
   }
 

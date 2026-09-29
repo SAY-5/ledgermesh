@@ -79,8 +79,8 @@ public class SyntheticProcessor implements PaymentProcessor {
   }
 
   @Override
-  public List<Authorization> outstanding(int limit) {
-    return holds.outstanding(limit);
+  public List<Authorization> outstanding(Authorization after, int limit) {
+    return holds.outstanding(after, limit);
   }
 
   /** A call answers at once or after the slow path's {@code slow-millis}; nothing takes longer. */

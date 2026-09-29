@@ -85,8 +85,8 @@ class VerifierProbeTest {
         .thenAnswer(call -> holds.release(call.getArgument(0), call.getArgument(1)));
     when(processor.releaseAuthorization(anyString(), anyString()))
         .thenAnswer(call -> holds.releaseCode(call.getArgument(0), call.getArgument(1)));
-    when(processor.outstanding(anyInt()))
-        .thenAnswer(call -> holds.outstanding((int) call.getArgument(0)));
+    when(processor.outstanding(any(), anyInt()))
+        .thenAnswer(call -> holds.outstanding(call.getArgument(0), (int) call.getArgument(1)));
   }
 
   /**

@@ -8,6 +8,8 @@ import io.ledgermesh.common.events.PaymentRequested;
 import io.ledgermesh.common.events.Topics;
 import io.ledgermesh.common.idempotency.IdempotentConsumer;
 import io.ledgermesh.payment.authorize.PaymentService;
+import io.ledgermesh.payment.domain.PaymentStatus;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
@@ -56,7 +58,16 @@ public class PaymentEventListener {
     String correlationId = CorrelationId.fromHeaders(record.headers(), event.correlationId());
     CorrelationId.bind(correlationId);
     try {
-      idempotent.once(CONSUMER, event.eventId(), () -> payments.requestAgain(event, correlationId));
+      AtomicReference<PaymentStatus> answered = new AtomicReference<>();
+      boolean fresh =
+          idempotent.once(
+              CONSUMER,
+              event.eventId(),
+              () -> answered.set(payments.answerRedrive(event, correlationId)));
+      // the processor is called once the consumer's transaction has committed, as for a reservation
+      if (fresh && answered.get() != null && answered.get().isOpen()) {
+        payments.attempt(event.orderId(), true);
+      }
     } finally {
       CorrelationId.clear();
     }

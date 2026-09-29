@@ -6,6 +6,7 @@ import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -50,6 +51,29 @@ class JdbcAuthorizationHoldsTest {
     assertThat(holds.release("o1", null)).isZero();
     assertThat(holds.outstanding("o1")).isZero();
     assertThat(holds.outstanding("o2")).isEqualTo(1);
+  }
+
+  @Test
+  void theListingPagesInGrantOrderFromWhereTheLastPageEnded() {
+    holds.grant("o5", "AUTH-F", BigDecimal.ONE);
+    holds.grant("o5", "AUTH-G", BigDecimal.ONE);
+    holds.grant("o6", "AUTH-H", BigDecimal.ONE);
+
+    List<PaymentProcessor.Authorization> first = holds.outstanding(null, 2);
+    List<PaymentProcessor.Authorization> second = holds.outstanding(first.get(1), 2);
+
+    assertThat(first)
+        .extracting(PaymentProcessor.Authorization::authorizationCode)
+        .containsExactly("AUTH-F", "AUTH-G");
+    assertThat(second)
+        .extracting(PaymentProcessor.Authorization::authorizationCode)
+        .containsExactly("AUTH-H");
+    assertThat(holds.releaseCode("o5", "AUTH-G")).isTrue();
+    assertThat(holds.releaseCode("o5", "AUTH-G")).isFalse();
+    assertThat(holds.releaseCode("o6", "AUTH-F")).isFalse();
+    assertThat(holds.outstanding(null, 10))
+        .extracting(PaymentProcessor.Authorization::authorizationCode)
+        .containsExactly("AUTH-F", "AUTH-H");
   }
 
   @Test
