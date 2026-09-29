@@ -25,6 +25,7 @@ public class OrderSagaSnapshot implements SagaSnapshot {
     this.orders = orders;
     this.clock = clock;
     meters.gauge("ledgermesh.saga.stuck", this, OrderSagaSnapshot::stuck);
+    meters.gauge("ledgermesh.saga.compensations.overdue", this, OrderSagaSnapshot::overdue);
   }
 
   @Override
@@ -44,5 +45,10 @@ public class OrderSagaSnapshot implements SagaSnapshot {
   /** Open orders whose current step has already passed its deadline. */
   public long stuck() {
     return orders.countByStatusInAndDeadlineAtLessThanEqual(OPEN, clock.instant());
+  }
+
+  /** Cancellations the payment service has not answered in the time the saga waits for it. */
+  public long overdue() {
+    return orders.countByCompensatedAtIsNullAndCompensationDueAtLessThanEqual(clock.instant());
   }
 }

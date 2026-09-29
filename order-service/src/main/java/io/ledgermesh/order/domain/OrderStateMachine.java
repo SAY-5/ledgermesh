@@ -1,6 +1,7 @@
 package io.ledgermesh.order.domain;
 
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Pure transition table for the order saga.
@@ -26,6 +27,10 @@ public final class OrderStateMachine {
   public static final String PAYMENT_DECLINED = "PAYMENT_DECLINED";
   public static final String RESERVATION_TIMEOUT = "RESERVATION_TIMEOUT";
   public static final String PAYMENT_TIMEOUT = "PAYMENT_TIMEOUT";
+
+  /** The cancellations that emit {@code order.cancelled}, and so wait for it to be answered. */
+  public static final Set<String> COMPENSATED =
+      Set.of(RESERVATION_TIMEOUT, PAYMENT_DECLINED, PAYMENT_TIMEOUT);
 
   /** Outcome of applying an event. {@code releaseInventory} requests compensation. */
   public record Transition(OrderStatus to, String reason, boolean releaseInventory) {}

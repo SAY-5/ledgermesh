@@ -8,6 +8,7 @@ import io.ledgermesh.common.outbox.OutboxEventRepository;
 import io.ledgermesh.order.TestClock;
 import io.ledgermesh.order.TestClockConfig;
 import io.ledgermesh.order.domain.Order;
+import io.ledgermesh.order.domain.OrderEvent;
 import io.ledgermesh.order.domain.OrderEventRepository;
 import io.ledgermesh.order.domain.OrderItem;
 import io.ledgermesh.order.domain.OrderRepository;
@@ -114,6 +115,50 @@ class StuckOrderReaperTest {
         .isEqualTo(OrderStatus.CONFIRMED);
     advance(Duration.ofSeconds(60));
     assertThat(reaper.reap()).isZero();
+  }
+
+  @Test
+  void aCancellationThePaymentServiceDoesNotAnswerIsSentAgainUntilItIs() {
+    Order order = saga.create("cust-1", List.of(new OrderItem("sku-1", 2, new BigDecimal("5.00"))));
+    advance(Duration.ofSeconds(31));
+    assertThat(reaper.reap()).isEqualTo(1);
+    Order cancelled = orders.findById(order.getId()).orElseThrow();
+    assertThat(cancelled.getCompensationDueAt()).isEqualTo(clock.instant().plusSeconds(60));
+
+    advance(Duration.ofSeconds(59));
+    assertThat(reaper.reap()).isZero();
+    advance(Duration.ofSeconds(1));
+    assertThat(reaper.reap()).isEqualTo(1);
+    advance(Duration.ofSeconds(60));
+    assertThat(reaper.reap()).isEqualTo(1);
+
+    List<OutboxEvent> cancellations =
+        outbox.findAll().stream().filter(r -> r.getTopic().equals(Topics.ORDER_CANCELLED)).toList();
+    assertThat(cancellations).hasSize(3);
+    assertThat(cancellations).extracting(OutboxEvent::getEventId).doesNotHaveDuplicates();
+    assertThat(cancellations).allMatch(r -> r.getPayload().contains("\"quantity\":2"));
+    assertThat(timeline.findByOrderIdOrderByIdAsc(order.getId()))
+        .extracting(OrderEvent::getType)
+        .containsSubsequence(
+            "RESERVATION_TIMEOUT", "CANCELLATION_SENT_AGAIN", "CANCELLATION_SENT_AGAIN");
+
+    assertThat(saga.compensated(order.getId(), "AUTHORIZED", "c")).isTrue();
+    advance(Duration.ofSeconds(600));
+    assertThat(reaper.reap()).isZero();
+    Order answered = orders.findById(order.getId()).orElseThrow();
+    assertThat(answered.getCompensatedAt()).isNotNull();
+    assertThat(answered.getCompensationDueAt()).isNull();
+  }
+
+  @Test
+  void anOrderCancelledForStockWaitsForNoAnswer() {
+    Order order = saga.create("cust-1", List.of(new OrderItem("sku-1", 1, new BigDecimal("5.00"))));
+    saga.apply(order.getId(), SagaEvent.INVENTORY_REJECTED, "c");
+
+    advance(Duration.ofSeconds(600));
+    assertThat(reaper.reap()).isZero();
+    assertThat(orders.findById(order.getId()).orElseThrow().getCompensationDueAt()).isNull();
+    assertThat(saga.resendCancellation(order.getId())).isFalse();
   }
 
   private void advance(Duration by) {

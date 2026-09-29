@@ -1,7 +1,9 @@
 package io.ledgermesh.order.domain;
 
 import java.time.Instant;
+import java.util.Collection;
 import java.util.List;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 public interface OrderRepository extends JpaRepository<Order, String> {
@@ -14,4 +16,15 @@ public interface OrderRepository extends JpaRepository<Order, String> {
 
   List<Order> findTop100ByStatusInAndDeadlineAtLessThanEqualOrderByDeadlineAtAsc(
       List<OrderStatus> statuses, Instant now);
+
+  /** Cancellations the payment service has not answered in time. */
+  List<Order>
+      findTop100ByCompensatedAtIsNullAndCompensationDueAtLessThanEqualOrderByCompensationDueAtAsc(
+          Instant now);
+
+  long countByCompensatedAtIsNullAndCompensationDueAtLessThanEqual(Instant now);
+
+  /** Orders cancelled for one of these reasons whose cancellation was never answered. */
+  List<Order> findByStatusAndReasonInAndCompensatedAtIsNullOrderByUpdatedAtAsc(
+      OrderStatus status, Collection<String> reasons, Pageable page);
 }

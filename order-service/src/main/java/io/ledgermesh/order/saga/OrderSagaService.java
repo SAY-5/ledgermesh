@@ -23,6 +23,7 @@ import java.util.Optional;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -33,12 +34,19 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
  * row that records it are written in one transaction through the outbox. The change is counted and
  * logged once that transaction has committed, so a change that rolls back, like the order of a call
  * that lost the race for its idempotency key, is neither.
+ *
+ * <p>A cancellation that emits {@code order.cancelled} waits for the payment service to answer it
+ * with {@code payment.voided}. Until then the reaper sends it again every {@code
+ * ledgermesh.saga.compensation}, so a cancellation that the payment service dead lettered, or never
+ * saw, is still answered without an operator; the payment service handles every copy the same way.
  */
 @Service
 public class OrderSagaService {
 
   public static final String CREATED = "CREATED";
   public static final String PAYMENT_REDRIVEN = "PAYMENT_REDRIVEN";
+  public static final String PAYMENT_VOIDED = "PAYMENT_VOIDED";
+  public static final String CANCELLATION_SENT_AGAIN = "CANCELLATION_SENT_AGAIN";
 
   private static final Logger log = LoggerFactory.getLogger(OrderSagaService.class);
 
@@ -137,6 +145,7 @@ public class OrderSagaService {
       outbox.append(
           new OrderCancelled(
               UUID.randomUUID().toString(), orderId, correlationId, now, t.reason(), lines(order)));
+      order.awaitCompensation(now.plus(timeouts.compensation()));
     }
     Duration elapsed = Duration.between(order.getCreatedAt(), now);
     afterCommit(
@@ -190,6 +199,95 @@ public class OrderSagaService {
               "order {} payment re-driven ({} of {})", orderId, redrives, timeouts.maxRedrives());
         });
     return true;
+  }
+
+  /**
+   * Records the payment service's answer to the cancellation. Returns false for an unknown order,
+   * an order that is not cancelled, or one whose cancellation was already answered, each of which
+   * leaves an ignored step in the timeline.
+   */
+  @Transactional
+  public boolean compensated(String orderId, String previous, String correlationId) {
+    Order order = orders.findById(orderId).orElse(null);
+    if (order == null) {
+      log.warn("payment.voided for unknown order {} ignored", orderId);
+      return false;
+    }
+    Instant now = clock.instant();
+    if (order.getStatus() != OrderStatus.CANCELLED || order.getCompensatedAt() != null) {
+      timeline.save(
+          new OrderEvent(
+              orderId, PAYMENT_VOIDED, order.getStatus(), null, previous, correlationId, now));
+      return false;
+    }
+    order.compensated(now);
+    timeline.save(
+        new OrderEvent(
+            orderId,
+            PAYMENT_VOIDED,
+            OrderStatus.CANCELLED,
+            OrderStatus.CANCELLED,
+            previous,
+            correlationId,
+            now));
+    afterCommit(() -> log.info("order {} compensated, its payment was {}", orderId, previous));
+    return true;
+  }
+
+  /**
+   * Sends {@code order.cancelled} again, under a fresh event id, for a cancelled order whose
+   * cancellation the payment service has not answered, and waits another {@code compensation} for
+   * the answer. Returns false when there is nothing to send: the order is not cancelled, was
+   * cancelled for stock, or has been answered.
+   */
+  @Transactional
+  public boolean resendCancellation(String orderId) {
+    Order order = orders.findById(orderId).orElse(null);
+    if (order == null
+        || order.getStatus() != OrderStatus.CANCELLED
+        || !OrderStateMachine.COMPENSATED.contains(order.getReason())
+        || order.getCompensatedAt() != null) {
+      return false;
+    }
+    Instant now = clock.instant();
+    outbox.append(
+        new OrderCancelled(
+            UUID.randomUUID().toString(),
+            orderId,
+            order.getCorrelationId(),
+            now,
+            order.getReason(),
+            lines(order)));
+    order.awaitCompensation(now.plus(timeouts.compensation()));
+    timeline.save(
+        new OrderEvent(
+            orderId,
+            CANCELLATION_SENT_AGAIN,
+            OrderStatus.CANCELLED,
+            OrderStatus.CANCELLED,
+            order.getReason(),
+            order.getCorrelationId(),
+            now));
+    afterCommit(
+        () -> {
+          metrics.cancellationSentAgain();
+          log.warn("order {} cancellation sent again, payment has not answered it", orderId);
+        });
+    return true;
+  }
+
+  /**
+   * Up to {@code max} cancelled orders whose cancellation was never answered, oldest first,
+   * including ones cancelled before the order service waited for answers at all.
+   */
+  @Transactional(readOnly = true)
+  public List<String> unansweredCancellations(int max) {
+    return orders
+        .findByStatusAndReasonInAndCompensatedAtIsNullOrderByUpdatedAtAsc(
+            OrderStatus.CANCELLED, OrderStateMachine.COMPENSATED, PageRequest.of(0, max))
+        .stream()
+        .map(Order::getId)
+        .toList();
   }
 
   private static void afterCommit(Runnable action) {
