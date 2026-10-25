@@ -3,6 +3,21 @@
 Dates are the commit dates of the release tags. Each numbered release is a demo milestone;
 see the versioning note in [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## v6.0.1 (2026-10-25)
+
+* Spring Boot 3.5.3 to 3.5.16, past GHSA-wwpq-f5c3-7hvx (fixed in 3.5.14): a local user on the
+  same host could take control of the directory `ApplicationTemp` uses. The session and code
+  execution paths the advisory describes need `server.servlet.session.persistent`, which no
+  service here sets. The parent also moves the versions it manages, among them Spring Framework
+  6.2.8 to 6.2.19, Spring Data 2025.0.1 to 2025.0.13, Hibernate ORM 6.6.18 to 6.6.53, Spring for
+  Apache Kafka 3.3.7 to 3.3.16 and Jackson 2.19.1 to 2.21.4.
+* The browser demo's build tools: vite 7.3.6 to 7.3.7, past GHSA-587h-7wmj-h5pm,
+  GHSA-698v-4r3x-3vcv and GHSA-r825-w8mm-5pxw in the launch-editor copy it bundles and
+  GHSA-9jrq-w75r-8gcw and GHSA-rq7h-c2jc-7f22, all five in the development server rather than
+  the static bundle `vite build` writes; and source-map-js 1.2.1 to 1.2.2, past
+  GHSA-68fv-2mgg-jv7q, which only postcss loads, during the build.
+* The services' code, schemas, events and tests are unchanged from 6.0.0.
+
 ## v6.0.0 (2026-09-29)
 
 * An order cancelled at a saga deadline kept the payment authorized for it. The payment service

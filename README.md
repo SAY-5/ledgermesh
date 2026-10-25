@@ -487,6 +487,8 @@ prints the overview of all three services at the end of a run.
 
 Every entry in full is in [CHANGELOG.md](CHANGELOG.md).
 
+* **v6.0.1**: Spring Boot 3.5.3 to 3.5.16, and vite 7.3.7 and source-map-js 1.2.2 in the browser
+  demo's build, past their published advisories; the services' code is unchanged.
 * **v6.0.0**: fixes duplicate orders from one idempotency key, payment creation races, and missing
   cancellation compensation. Durable authorization claims and retirement prevent late answers
   from keeping released holds and reconciliation from releasing a concurrently kept code. Also adds
